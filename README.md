@@ -70,6 +70,13 @@ python3 copilot_playwright.py --image photo.png   # attach a specific file
 First run: sign in to Copilot in the opened window. The session is saved in
 `./pw-profile`, so later runs start already signed in.
 
+> **Microsoft "This browser or app may not be secure" block:** Microsoft
+> refuses sign-in from automated browsers. The script avoids that entirely:
+> it copies your **real Firefox** session cookies (you are already signed in
+> there) into the automated window, so it never visits the sign-in page.
+> Requirement: be signed in at copilot.microsoft.com in your normal Firefox.
+> Use `--no-cookies` to skip the import (e.g. to run as guest).
+
 ## The three scripts compared
 
 | script | how it finds buttons | needs templates? | file dialog? | reliability |

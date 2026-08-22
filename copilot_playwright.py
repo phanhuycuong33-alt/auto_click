@@ -25,7 +25,10 @@ First run: sign in to Copilot in the opened window — the session persists.
 """
 
 import argparse
+import shutil
+import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -48,12 +51,60 @@ def visible(loc, timeout=2000):
         return False
 
 
+def load_firefox_cookies():
+    """Copy Microsoft session cookies from the user's REAL Firefox profile.
+
+    Firefox stores cookies plaintext in cookies.sqlite (no decryption needed
+    on Linux). We copy the db (+ WAL) to a temp file so Firefox can keep
+    running, then read the Microsoft/live.com cookies. This lets the
+    Playwright window arrive ALREADY SIGNED IN — Microsoft's anti-automation
+    check only fires on the sign-in page, which we never visit.
+    """
+    candidates = []
+    for base in (Path.home() / ".mozilla" / "firefox",
+                 Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"):
+        if base.is_dir():
+            candidates += sorted(base.glob("*/cookies.sqlite"))
+    if not candidates:
+        print("[!] no Firefox profile found (~/.mozilla/firefox or snap path)")
+        return None
+    db = max(candidates, key=lambda p: p.stat().st_mtime)  # most recent profile
+    tmp = Path(tempfile.mkdtemp()) / "cookies.sqlite"
+    shutil.copy2(db, tmp)
+    for suffix in ("-wal", "-shm"):
+        src = Path(str(db) + suffix)
+        if src.exists():
+            shutil.copy2(src, Path(str(tmp) + suffix))
+    con = sqlite3.connect(f"file:{tmp}?immutable=1", uri=True)
+    rows = con.execute(
+        "SELECT name, value, host, path, expiry, isSecure, isHttpOnly "
+        "FROM moz_cookies WHERE host LIKE '%microsoft%' OR host LIKE '%live.com'"
+    ).fetchall()
+    con.close()
+    cookies = []
+    for name, value, host, path, expiry, isSecure, isHttpOnly in rows:
+        if not value:
+            continue
+        cookies.append({
+            "name": name,
+            "value": value,
+            "domain": host if host.startswith(".") else "." + host,
+            "path": path or "/",
+            "expires": int(expiry) if expiry and expiry > 0 else -1,
+            "secure": bool(isSecure),
+            "httpOnly": bool(isHttpOnly),
+        })
+    return cookies or None
+
+
 def main():
     ap = argparse.ArgumentParser(description="Attach an image to Copilot via Playwright + Firefox")
     ap.add_argument("--image", default=None, help="image to attach (default: fresh screenshot)")
     ap.add_argument("--question", default=DEFAULT_QUESTION, help="question to ask")
     ap.add_argument("--no-screenshot", action="store_true", help="don't capture a fresh screenshot")
     ap.add_argument("--timeout", type=int, default=30000, help="per-action timeout ms")
+    ap.add_argument("--no-cookies", action="store_true",
+                    help="skip importing your real Firefox session cookies")
     args = ap.parse_args()
 
     from playwright.sync_api import sync_playwright
@@ -85,10 +136,36 @@ def main():
         )
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
         page.set_default_timeout(args.timeout)
+
+        # --- import real Firefox session so we never hit the sign-in page --
+        if not args.no_cookies:
+            cookies = load_firefox_cookies()
+            if cookies:
+                try:
+                    ctx.add_cookies(cookies)
+                    print(f"[i] imported {len(cookies)} session cookies from your real Firefox")
+                except Exception as e:
+                    print(f"[!] cookie import failed: {e}")
+            else:
+                print("[!] no Microsoft cookies found in your Firefox profile —")
+                print("    sign in to copilot.microsoft.com in your NORMAL Firefox first.")
+
         page.goto(URL)
-        print("[i] page loaded. If Copilot asks you to SIGN IN, sign in now —")
-        print("    the session is saved in ./pw-profile for future runs.")
-        input(">>> Press Enter here once the chat page is ready... ")
+        page.wait_for_load_state("domcontentloaded")
+
+        # --- detect the sign-in page (Microsoft blocks automated sign-in) ---
+        signin_shown = False
+        for name in ["Sign in", "Sign in to continue"]:
+            if visible(page.get_by_role("button", name=name, exact=False).first, 2500):
+                signin_shown = True
+                break
+        if signin_shown:
+            print("[!] sign-in page detected — Microsoft blocks automated sign-in.")
+            print("    Fix: open copilot.microsoft.com in your NORMAL Firefox, sign in,")
+            print("    close it, then re-run this script (cookies will be imported).")
+            ctx.close()
+            return
+        print("[i] signed-in session OK — continuing")
 
         # ---------------- 1. open the attach menu (paperclip / '+') -------
         opener = None
