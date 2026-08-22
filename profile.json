@@ -1,0 +1,40 @@
+{
+  "birthday": {
+    "value": "8/12/1988",
+    "iso": "1988-12-08",
+    "date_parts": { "day": "8", "month": "12", "month_name": "Dec", "year": "1988" },
+    "aliases": ["birthday", "date of birth", "dob", "birth date", "ngay sinh"]
+  },
+  "gender": {
+    "value": "Male",
+    "aliases": ["gender", "sex", "gioi tinh"]
+  },
+  "birth_place": {
+    "value": "Ho Chi Minh City",
+    "aliases": ["birth place", "place of birth", "born in", "city of birth", "noi sinh"]
+  },
+  "live_in": {
+    "value": "Ho Chi Minh City",
+    "aliases": ["live in", "living in", "residence", "current city", "city"]
+  },
+  "zip_code": {
+    "value": "700000",
+    "aliases": ["zip code", "zipcode", "zip", "postal code", "postcode"]
+  },
+  "street_address": {
+    "value": "14 Phan Van Hon",
+    "aliases": ["street address", "street", "address"]
+  },
+  "marital_status": {
+    "value": "Married",
+    "aliases": ["marital status", "marital", "married", "tinh trang hon nhan"]
+  },
+  "children_count": {
+    "value": "1",
+    "aliases": ["number of children", "children", "kids"]
+  },
+  "family_income": {
+    "value": "6000",
+    "aliases": ["household income", "family income", "monthly income", "income", "revenue before tax", "before tax"]
+  }
+}

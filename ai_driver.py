@@ -70,6 +70,7 @@ SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is t
 
 Rules:
 - Only lines starting with [N] are CLICKABLE elements. Lines starting with * are page context (headings/text) — never click them.
+- Inspect the HTML structure to know the widget type: native <select>, custom dropdown, date picker (3 selects: day/month/year), radio group, checkbox, slider, autocomplete. Give the input in the format the element needs (e.g. date picker -> select day/month/year; text input -> fill).
 - If a popup/modal is open, handle it first (close or accept it) before anything else.
 - Ignore logo/navigation links (href='/') unless there is nothing else useful.
 - Dropdowns/lists: use select [N] with 'Option Text' for <select> elements; for listed option items, click the right one directly with click [N].
@@ -330,7 +331,7 @@ def click_text(page, text):
         candidates.append(t2)
         t = t2
     for cand in candidates:
-        for role in ("button", "link"):
+        for role in ("button", "link", "radio", "checkbox"):
             try:
                 page.get_by_role(role, name=cand, exact=False).first.click(timeout=3000)
                 print(f"[exec] click '{cand}' (role={role})")
@@ -374,6 +375,108 @@ def find_input(page, hint):
         except Exception:
             continue
     return None
+
+
+PROFILE_FILE = BASE / "profile.json"
+MONTH_NAMES = ["jan", "feb", "mar", "apr", "may", "jun",
+               "jul", "aug", "sep", "oct", "nov", "dec"]
+
+
+def load_profile():
+    """Load profile.json (auto-answers for common survey questions)."""
+    if PROFILE_FILE.exists():
+        try:
+            return json.loads(PROFILE_FILE.read_text())
+        except Exception as e:
+            print(f"[!] profile.json parse error: {e}")
+    return {}
+
+
+def auto_answer(page, schema_text, profile):
+    """Fill common survey questions directly from profile.json — no AI needed.
+    Handles text inputs, date inputs, native selects (incl. day/month/year
+    date pickers) and clickable options. Returns True if anything was filled."""
+    if not profile:
+        return False
+    rules = []
+    for key, entry in profile.items():
+        if isinstance(entry, str):
+            value, meta = entry, {}
+            aliases = [key]
+        else:
+            value = entry.get("value", "")
+            meta = entry
+            aliases = [key] + [a for a in entry.get("aliases", [])]
+        for a in aliases:
+            if a:
+                rules.append((a.lower(), key, value, meta))
+    rules.sort(key=lambda r: len(r[0]), reverse=True)  # most specific first
+
+    filled_any = False
+    for line in schema_text.splitlines():
+        if not line.startswith("["):
+            continue
+        m = re.match(r"^\[(\d+)\]\s+(\w+)", line)
+        if not m:
+            continue
+        n, tag = int(m.group(1)), m.group(2)
+        hint = line.lower()
+        hit = next(((a, k, v, meta) for a, k, v, meta in rules if a in hint), None)
+        if hit is None:
+            continue
+        alias, key, value, meta = hit
+        loc = resolve_element(page, n)
+        if loc is None:
+            continue
+        try:
+            if tag == "select":
+                opts = line.split("options='", 1)
+                opts_lower = opts[1].split("'", 1)[0].lower() if len(opts) > 1 else ""
+                done = False
+                if value:
+                    try:
+                        loc.select_option(label=value)
+                        done = True
+                    except Exception:
+                        try:
+                            loc.select_option(value=value)
+                            done = True
+                        except Exception:
+                            pass
+                dp = meta.get("date_parts") if isinstance(meta, dict) else None
+                if not done and dp:
+                    if any(mon in opts_lower for mon in MONTH_NAMES):
+                        loc.select_option(label=dp["month_name"])
+                    elif re.search(r"\b(19|20)\d\d\b", opts_lower):
+                        loc.select_option(label=dp["year"])
+                    else:
+                        loc.select_option(label=dp["day"])
+                print(f"[profile] select [{n}] '{key}' = '{value}'")
+                filled_any = True
+            elif tag == "input":
+                itype = ""
+                mm = re.search(r"type='([^']*)'", line)
+                if mm:
+                    itype = mm.group(1)
+                val = value
+                if itype == "date":
+                    dp = meta.get("date_parts") if isinstance(meta, dict) else None
+                    val = (dp or {}).get("iso", value)
+                loc.fill(val)
+                print(f"[profile] fill [{n}] '{key}' = '{val}'")
+                filled_any = True
+            elif tag == "textarea":
+                loc.fill(value)
+                print(f"[profile] fill [{n}] '{key}' = '{value}'")
+                filled_any = True
+            else:
+                # radio / checkbox / div / li option — click the matching one
+                if click_text(page, value):
+                    print(f"[profile] click '{value}' for '{key}'")
+                    filled_any = True
+        except Exception as e:
+            print(f"[!] profile answer failed for '{key}' on [{n}]: {e}")
+    return filled_any
 
 
 def execute_command(page, line):
@@ -1058,6 +1161,9 @@ def main():
 
     providers = [p.strip().lower() for p in args.providers.split(",") if p.strip()]
     prompt = INSTRUCTION.format(task=args.task)
+    profile = load_profile()
+    if profile:
+        print(f"[i] profile loaded: {len(profile)} auto-answers (birthday, address, income, ...)")
 
     # domains to import cookies for: the task site (from --url) + extras
     extra_domains = []
@@ -1176,6 +1282,13 @@ def main():
                             (SHOTS / f"schema_round_{step}.txt").write_text(schema_text)
                         except Exception:
                             pass
+                        auto_filled = auto_answer(task_page, schema_text, profile)
+                        if auto_filled:
+                            print("[i] profile auto-answers applied — skipping AI this round")
+                            task_page.wait_for_timeout(1200)
+                            done_round = True
+                            consecutive_fails = 0
+                            break
                         prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
                         if no_progress:
                             prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
