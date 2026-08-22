@@ -142,7 +142,7 @@ SCHEMA_JS = """(startN) => {
     const out = [];
     const ctx = [];
     const vw = window.innerWidth, vh = window.innerHeight;
-    const MAX = startN + 100;
+    const MAX = startN + 150;
     let n = startN;
     const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
     const consider = (el) => {
@@ -163,7 +163,7 @@ SCHEMA_JS = """(startN) => {
         const isHard = tag === 'a' || tag === 'button' || tag === 'input' || tag === 'textarea' || tag === 'select'
             || el.getAttribute('contenteditable') === 'true' || el.hasAttribute('onclick') || !!role || tabbable;
         const pointer = st.cursor === 'pointer';
-        if (!isHard && !pointer) return;  // clickable divs/spans (cursor:pointer) are included
+        if (!isHard && !pointer && (tag !== 'div' && tag !== 'span')) return;
         const type = el.getAttribute('type') || '';
         const aria = clean(el.getAttribute('aria-label'));
         const ph = clean(el.getAttribute('placeholder'));
@@ -174,11 +174,16 @@ SCHEMA_JS = """(startN) => {
         const val = clean(el.getAttribute('value')).slice(0, 30);
         const testid = clean(el.getAttribute('data-testid'));
         const text = clean(el.innerText).slice(0, 60);
+        // react-native-web clickables often have NO role/tabindex/cursor — they
+        // are plain divs with text. Accept them unless they wrap a real control.
+        const hasInteractiveKid = el.querySelector('button, a, input, textarea, select, [role="button"], [role="link"], [onclick]') !== null;
+        if (!isHard && !pointer && !(text.length >= 2 && !hasInteractiveKid)) return;
         let labelTxt = '';
         try {
             if (el.labels && el.labels.length) labelTxt = clean(el.labels[0].innerText).slice(0, 40);
         } catch (e) {}
-        const key = tag + '|' + type + '|' + (text || aria || ph || name || type || tag) + '|' + href + '|' + pointer;
+        const key = tag + '|' + type + '|' + (text || aria || ph || name || type || tag) + '|' + href + '|' + pointer
+            + '|' + Math.round(r.top / 60) + '|' + Math.round(r.left / 60);
         if (seen.has(key)) return;
         seen.add(key);
         el.setAttribute('data-ai', String(n));
@@ -251,7 +256,7 @@ def _extract_schema_once(page):
                 all_lines.append(f"--- frame[{idx}] {host} ---")
             all_lines.extend(data.get("ctx", []))
             all_lines.extend(data["elements"])
-            if n >= 200:
+            if n >= 300:
                 break
         return "\n".join(all_lines)
     except Exception as e:
