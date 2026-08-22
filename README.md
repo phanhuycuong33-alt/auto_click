@@ -64,6 +64,7 @@ playwright install-deps firefox
 
 # run:
 python3 copilot_playwright.py                     # screenshot + "what is this"
+python3 copilot_playwright.py "what color is my image"   # your question as argument
 python3 copilot_playwright.py --image photo.png   # attach a specific file
 ```
 

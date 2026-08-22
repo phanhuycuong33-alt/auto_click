@@ -100,12 +100,16 @@ def load_firefox_cookies():
 def main():
     ap = argparse.ArgumentParser(description="Attach an image to Copilot via Playwright + Firefox")
     ap.add_argument("--image", default=None, help="image to attach (default: fresh screenshot)")
-    ap.add_argument("--question", default=DEFAULT_QUESTION, help="question to ask")
+    ap.add_argument("question", nargs="?", default=None,
+                    help='the question, e.g. "what color is my image" (positional)')
+    ap.add_argument("--question", dest="question_opt", default=DEFAULT_QUESTION,
+                    help="question to ask (alternative to positional)")
     ap.add_argument("--no-screenshot", action="store_true", help="don't capture a fresh screenshot")
     ap.add_argument("--timeout", type=int, default=30000, help="per-action timeout ms")
     ap.add_argument("--no-cookies", action="store_true",
                     help="skip importing your real Firefox session cookies")
     args = ap.parse_args()
+    question = args.question or args.question_opt or DEFAULT_QUESTION
 
     from playwright.sync_api import sync_playwright
     from playwright.sync_api import TimeoutError as PWTimeout
@@ -229,11 +233,11 @@ def main():
         textbox = page.get_by_role("textbox").last
         textbox.click()
         try:
-            textbox.fill(args.question)
+            textbox.fill(question)
         except Exception:
             textbox.click()
-            page.keyboard.type(args.question, delay=30)
-        print(f"[i] typed question: {args.question}")
+            page.keyboard.type(question, delay=30)
+        print(f"[i] typed question: {question}")
 
         # ---------------- 4. send -----------------------------------------
         sent = False
