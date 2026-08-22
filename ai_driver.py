@@ -62,12 +62,17 @@ done
 Choose the single next best action for: {task}
 When the task is fully done, reply exactly: done"""
 
-SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is the CURRENT page structure (visible interactive elements):
+SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is the CURRENT page:
 
 {schema}
 
+Rules:
+- Only lines starting with [N] are CLICKABLE elements. Lines starting with * are page context (headings/text) — never click them.
+- If a popup/modal is open, handle it first (close or accept it) before anything else.
+- Ignore logo/navigation links (href='/') unless there is nothing else useful.
+
 Reply with ONLY ONE line, one of these formats:
-click 'button text'   (or click [N] using the element number)
+click 'text'   (or click [N])
 fill 'field' with 'value'   (or fill [N] with 'value')
 type 'text'
 wait '3'
@@ -76,7 +81,6 @@ goto 'https://url'
 done
 
 Choose the single next best action for: {task}
-Prefer element numbers [N] when the text is ambiguous.
 When the task is fully done, reply exactly: done"""
 
 ATTACH_OPENERS = ["Add context", "Attach", "Attach files", "Attach media"]
@@ -131,11 +135,13 @@ def images_similar(a_path, b_path, threshold=6.0):
 SCHEMA_JS = """(startN) => {
     const seen = new Set();
     const out = [];
+    const ctx = [];
     const vw = window.innerWidth, vh = window.innerHeight;
-    const sels = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [onclick], [contenteditable="true"]';
+    const sels = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [onclick], [contenteditable="true"]';
     let n = startN;
     for (const el of document.querySelectorAll(sels)) {
         if (el.tagName === 'IFRAME') continue;
+        if (el.disabled) continue;
         if (el.closest('[aria-hidden="true"]')) continue;
         if (el.closest('[data-testid*="toast" i], [class*="toast" i]')) continue;
         const r = el.getBoundingClientRect();
@@ -149,6 +155,10 @@ SCHEMA_JS = """(startN) => {
         const ph = (el.getAttribute('placeholder') || '').trim();
         const name = (el.getAttribute('name') || '').trim();
         const href = (el.getAttribute('href') || '').trim();
+        const title = (el.getAttribute('title') || '').trim();
+        const alt = ((el.querySelector('img') || {}).alt || '').trim();
+        const val = (el.getAttribute('value') || '').trim().slice(0, 30);
+        const testid = (el.getAttribute('data-testid') || '').trim();
         const text = (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
         const label = text || aria || ph || name || type || tag;
         const key = tag + '|' + type + '|' + label + '|' + href;
@@ -157,16 +167,27 @@ SCHEMA_JS = """(startN) => {
         el.setAttribute('data-ai', String(n));
         let d = '[' + n + '] ' + tag;
         if (type) d += ' type=' + type;
-        if (aria) d += " aria='" + aria + "'";
+        if (text) d += " text='" + text + "'";
+        if (aria && aria !== text) d += " aria='" + aria + "'";
         if (ph) d += " placeholder='" + ph + "'";
         if (name) d += " name='" + name + "'";
-        if (text) d += " text='" + text + "'";
-        if (href && href !== '#') d += " href='" + href.slice(0, 80) + "'";
+        if (val && (tag === 'button' || type === 'submit' || type === 'button')) d += " value='" + val + "'";
+        if (title && title !== text) d += " title='" + title + "'";
+        if (alt) d += " img_alt='" + alt + "'";
+        if (testid) d += " testid='" + testid + "'";
+        if (href && href !== '#') d += " href='" + href.slice(0, 60) + "'";
         out.push(d);
         n++;
         if (n >= startN + 60) break;
     }
-    return { title: document.title, url: location.href, elements: out, next: n };
+    for (const h of document.querySelectorAll('h1, h2, h3')) {
+        const t = (h.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+        if (t) ctx.push('* ' + h.tagName.toLowerCase() + " '" + t + "'");
+    }
+    let bodyText = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim();
+    if (bodyText.length > 300) bodyText = bodyText.slice(0, 300) + '...';
+    if (bodyText) ctx.push("* page text: '" + bodyText + "'");
+    return { title: document.title, url: location.href, elements: out, ctx: ctx, next: n };
 }"""
 
 
@@ -211,6 +232,7 @@ def extract_schema(page):
             else:
                 host = (fr.url.split("/")[2] if "/" in fr.url else fr.url) or "frame"
                 all_lines.append(f"--- frame[{idx}] {host} ---")
+            all_lines.extend(data.get("ctx", []))
             all_lines.extend(data["elements"])
             if n >= 120:
                 break
@@ -904,6 +926,13 @@ def main():
                 for rmode in round_modes:
                     if rmode == "schema":
                         schema_text = extract_schema(task_page)
+                        print(f"--- schema (round {step}) ---")
+                        print(schema_text[:4000])
+                        print("--- end schema ---")
+                        try:
+                            (SHOTS / f"schema_round_{step}.txt").write_text(schema_text)
+                        except Exception:
+                            pass
                         prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
                         if no_progress:
                             prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
