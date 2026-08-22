@@ -40,6 +40,7 @@ SHOTS = BASE / "screenshots"
 SHOTS.mkdir(exist_ok=True)
 PROFILE = BASE / "pw-profile"
 REAL_PROFILE_COPY = BASE / "pw-real-profile"
+PROFILE_MAX_AGE = 600  # seconds — reuse the profile copy if fresh enough
 
 DEFAULT_STEPS = 5
 DEFAULT_PROVIDERS = ["copilot", "chatgpt", "deepseek"]
@@ -580,15 +581,21 @@ def find_real_profile_dir():
     return max(candidates, key=lambda p: p.stat().st_mtime).parent
 
 
-def prepare_real_profile():
+def prepare_real_profile(force=False):
     """Copy the real Firefox profile so Playwright sees the EXACT same
     session (cookies + localStorage + IndexedDB + everything). Returns the
-    copy's path, or None if no profile was found."""
+    copy's path, or None if no profile was found.
+    Reuses a recent copy (<PROFILE_MAX_AGE) unless force=True."""
     src = find_real_profile_dir()
     if src is None:
         print("[!] no real Firefox profile found")
         return None
     dst = REAL_PROFILE_COPY
+    if not force and dst.exists():
+        age = time.time() - dst.stat().st_mtime
+        if age < PROFILE_MAX_AGE:
+            print(f"[i] profile copy is fresh ({int(age)}s old) — reusing {dst}")
+            return dst
     if dst.exists():
         shutil.rmtree(dst)
     ignore = shutil.ignore_patterns(
@@ -619,6 +626,8 @@ def main():
     ap.add_argument("--no-real-profile", action="store_true",
                     help="use cookie/localStorage injection instead of copying your real Firefox profile "
                          "(slower to be robust; only for testing)")
+    ap.add_argument("--refresh-profile", action="store_true",
+                    help="force a fresh copy of the real Firefox profile")
     args = ap.parse_args()
 
     if re.match(r"^\s*(task\s*:|i am automating this browser)", args.task, re.I):
@@ -646,7 +655,7 @@ def main():
         if args.no_real_profile:
             user_dir = PROFILE
         else:
-            user_dir = prepare_real_profile() or PROFILE
+            user_dir = prepare_real_profile(force=args.refresh_profile) or PROFILE
         ctx = p.firefox.launch_persistent_context(
             user_data_dir=str(user_dir), headless=False,
             viewport={"width": 1400, "height": 900})
