@@ -25,6 +25,7 @@ signed in there: copilot.microsoft.com, chatgpt.com, chat.deepseek.com).
 """
 
 import argparse
+import random
 import re
 import shutil
 import sqlite3
@@ -588,6 +589,44 @@ def send_message(page, provider, text):
     return True
 
 
+def confirm_sent(page, provider, marker):
+    """Verify the message was ACTUALLY submitted before we blame the AI for
+    not replying. Confirms via: input cleared, our unique marker visible in
+    the thread, or a Stop/generating button appeared."""
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        # 1) input cleared = send consumed it
+        try:
+            tb = provider_textbox(page, provider)
+            if tb is not None and tb.count():
+                val = (tb.input_value() or "").strip() or (tb.inner_text() or "").strip()
+                if not val:
+                    return True
+        except Exception:
+            pass
+        # 2) our unique round marker is visible in the thread (user message)
+        try:
+            for sel in ('[data-message-author-role="user"]',
+                        '[data-content="user-message"]', '[data-content="user"]'):
+                loc = page.locator(sel)
+                n = loc.count()
+                if n:
+                    last = loc.nth(n - 1).inner_text()
+                    if marker and marker in last:
+                        return True
+        except Exception:
+            pass
+        # 3) generation started
+        try:
+            stop = page.locator('button:has-text("Stop")').first
+            if stop.count() and stop.is_visible():
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
 def attach_image(page, provider, image):
     page.keyboard.press("Escape")
     page.wait_for_timeout(600)
@@ -664,8 +703,9 @@ def attach_image(page, provider, image):
         return False
 
 
-def ask_provider(page, provider, image, task, prompt, attach=True):
+def ask_provider(page, provider, image, task, prompt, attach=True, marker=""):
     """One round on one provider. attach=False = schema mode (no image).
+    Verifies the message was actually sent before waiting for a reply.
     Returns reply text or None."""
     urls = {"copilot": "https://copilot.microsoft.com/",
             "chatgpt": "https://chatgpt.com/",
@@ -685,6 +725,16 @@ def ask_provider(page, provider, image, task, prompt, attach=True):
                 return None
         if not send_message(page, provider, prompt):
             return None
+        if not confirm_sent(page, provider, marker):
+            print(f"[!] {provider}: message NOT confirmed sent — retrying once")
+            page.wait_for_timeout(1500)
+            if not send_message(page, provider, prompt):
+                print(f"[!] {provider}: retry send failed — skipping provider")
+                return None
+            if not confirm_sent(page, provider, marker):
+                print(f"[!] {provider}: still not confirmed — skipping provider")
+                return None
+        print(f"[i] {provider}: message confirmed sent")
     except Exception as e:
         print(f"[!] {provider}: send/attach raised: {e}")
         try:
@@ -952,6 +1002,7 @@ def main():
                                     ") but the page looks identical — nothing happened. "
                                     "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
 
+                marker = f"round marker {step}-{random.randint(1000, 9999)}"
                 round_modes = ["image", "schema"] if args.mode == "auto" else [args.mode]
                 done_round = False
                 for rmode in round_modes:
@@ -979,9 +1030,10 @@ def main():
                                             "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
                         attach = True
                         print("[i] mode: image (screenshot)")
+                    prompt_round = prompt_round + f"\n{marker}"
                     for provider in providers:
                         reply = ask_provider(ai_page, provider, shot if attach else None,
-                                             args.task, prompt_round, attach=attach)
+                                             args.task, prompt_round, attach=attach, marker=marker)
                         if reply and reply.strip():
                             print(f"[{provider}] {reply!r}")
                             cmd = parse_command(reply, exclude=prompt_round)
