@@ -47,27 +47,21 @@ DEFAULT_STEPS = 5
 
 ATTACH_OPENERS = ["Add context", "Attach", "Attach files", "Attach media"]
 
-# The instruction sent to Copilot each round — it MUST output one parseable line.
-INSTRUCTION = """TASK: {task}
+# The instruction sent to Copilot each round — short + strict so the reply
+# is exactly one parseable line. (Your task text is injected into {task}.)
+INSTRUCTION = """You are controlling my browser via Playwright. I just attached a screenshot of the current page.
 
-I am automating this browser with Python + Playwright. I just attached a screenshot of the current page.
-
-Reply with EXACTLY ONE line, nothing else, using ONLY one of these formats:
-
-click 'button or link text'
+Reply with ONLY ONE line, one of these formats:
+click 'button text'
 fill 'field' with 'value'
-type 'text to type'
+type 'text'
 wait '3'
-scroll 'down'   (or 'up')
+scroll 'down' or 'up'
 goto 'https://url'
 done
 
-Rules:
-- Choose the single most useful next action for the task.
-- For click, use the exact visible text of the button or link.
-- For fill, use the field's label or placeholder text.
-- If you need to see the result of your action before choosing more, output just that one action.
-- When the task is fully done, output exactly: done"""
+Choose the single next best action for: {task}
+When the task is fully done, reply exactly: done"""
 
 
 # ---------------------------------------------------------------- helpers
@@ -145,12 +139,14 @@ def send_message(page, text):
     return True
 
 
-def extract_last_assistant_reply(page, timeout=90):
-    """Wait for the newest Copilot message to finish streaming, return its text."""
+def extract_last_assistant_reply(page, timeout=120):
+    """Wait for the newest Copilot message to finish streaming, return its text.
+    Tries known message selectors, then a generic [data-content] catch-all."""
     selectors = ('[data-content="assistant-message"]',
+                 '[data-content="assistant"]',
                  '[data-testid="assistant-message"]',
                  '.assistant-message')
-    last_text, stable_since = "", time.time()
+    last_text, stable_since, started = "", time.time(), False
     deadline = time.time() + timeout
     while time.time() < deadline:
         text = ""
@@ -163,9 +159,18 @@ def extract_last_assistant_reply(page, timeout=90):
                     break
             except Exception:
                 continue
-        if text and text != last_text:
+        if not text:  # generic catch-all: newest element with data-content
+            try:
+                loc = page.locator("[data-content]")
+                if loc.count():
+                    text = loc.nth(loc.count() - 1).inner_text()
+            except Exception:
+                pass
+        if text != last_text:
+            if text:
+                started = True
             last_text, stable_since = text, time.time()
-        elif text and text == last_text and time.time() - stable_since > 3:
+        elif started and text and time.time() - stable_since > 4:
             return text
         page.wait_for_timeout(1000)
     return last_text
@@ -176,9 +181,15 @@ def quoted(s):
     return m.group(1) if m else s
 
 
-def parse_command(reply):
+def parse_command(reply, exclude=""):
+    """Find the last command-looking line in Copilot's reply.
+    Lines that are part of our own prompt are ignored (avoids false matches)."""
     for line in reversed(reply.strip().splitlines()):
         line = line.strip().lstrip("*-`# ")
+        if not line:
+            continue
+        if exclude and line in exclude:
+            continue
         if re.match(r"^(click|fill|type|wait|scroll|goto|done)\b", line, re.I):
             return line
     return None
@@ -290,6 +301,12 @@ def main():
     ap.add_argument("--no-cookies", action="store_true", help="skip real-Firefox cookie import")
     args = ap.parse_args()
 
+    if re.match(r"^\s*(task\s*:|i am automating this browser)", args.task, re.I):
+        print("[!] looks like you pasted the instruction template as the task!")
+        print("    pass your REAL goal in plain words, e.g.:")
+        print('    .venv/bin/python3 copilot_driver.py --image survey_web.png "i want to make money with this web by doing a survey"')
+        return
+
     with sync_playwright() as p:
         ctx = p.firefox.launch_persistent_context(
             user_data_dir=str(PROFILE), headless=False,
@@ -333,10 +350,15 @@ def main():
                 return
             print("[i] waiting for Copilot's next action...")
 
-            reply = extract_last_assistant_reply(page, timeout=90)
+            reply = extract_last_assistant_reply(page, timeout=120)
             print(f"[copilot] {reply!r}")
+            if not reply.strip():
+                shot_dbg = SHOTS / f"debug_reply_{step}.png"
+                page.screenshot(path=str(shot_dbg))
+                print(f"[!] no reply text captured — debug screenshot saved: {shot_dbg}")
+                break
 
-            cmd = parse_command(reply)
+            cmd = parse_command(reply, exclude=prompt)
             if cmd is None:
                 print("[!] no recognizable command in reply — stopping")
                 break
