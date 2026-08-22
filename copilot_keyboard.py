@@ -29,6 +29,8 @@ DEPENDENCIES (added by install.sh):
 
 import argparse
 import logging
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -82,6 +84,8 @@ def get_firefox_app():
         apps = [a for a in root.children if "firefox" in (a.name or "").lower()]
         if not apps:
             log.warning("no Firefox window found in the accessibility tree")
+            log.warning("tip: AT mode needs Firefox started BY this script (a11y forced on);")
+            log.warning("otherwise the flow falls back to tab-walk (window focus is handled automatically)")
             return None
         return apps[-1]  # most recently opened
     except Exception as e:
@@ -151,13 +155,63 @@ def dump_buttons(app=None):
 
 
 # ---------------------------------------------------------------- keyboard helpers
+def firefox_running():
+    try:
+        return subprocess.run(["pgrep", "-x", "firefox"],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return True  # cannot tell — do not block
+
+
+def focus_firefox():
+    """Bring Firefox to the front so keyboard input lands on the page,
+    NOT on the terminal where the script is running."""
+    if shutil.which("xdotool"):
+        try:
+            subprocess.run(["xdotool", "search", "--onlyvisible", "--class", "firefox",
+                            "windowactivate", "--sync"],
+                           capture_output=True, timeout=10)
+            time.sleep(0.8)
+            log.info("focused Firefox window (xdotool)")
+            return True
+        except Exception as e:
+            log.warning("xdotool windowactivate failed: %s", e)
+    log.warning("xdotool not available — keyboard input may go to the wrong window!")
+    return False
+
+
 def tab_walk(presses, label):
+    focus_firefox()  # keys must land on the web page, not the terminal
     log.info("tab-walk: Tab x%d then Enter for '%s'", presses, label)
     for _ in range(presses):
         pyautogui.press("tab")
         time.sleep(TAB_STEP)
     pyautogui.press("enter")
     time.sleep(1.2)
+
+
+def find_compose_input():
+    """Pick the largest multi-line text area in Firefox (= the message box)."""
+    app = get_firefox_app()
+    if app is None:
+        return None
+    from dogtail import predicate
+    best, best_area = None, 0
+    for role in COMPOSE_ROLES:
+        try:
+            for n in app.findChildren(predicate.GenericPredicate(roleName=role)):
+                try:
+                    w, h = n.size
+                    area = w * h
+                except Exception:
+                    area = 0
+                if area > best_area:
+                    best, best_area = n, area
+        except Exception:
+            continue
+    if best:
+        log.info("AT found message input (role=%s)", best.roleName)
+    return best
 
 
 def type_text(text):
@@ -172,12 +226,17 @@ def press_enter():
 
 # ---------------------------------------------------------------- steps
 def step_open():
-    env = {"MOZ_ACCESSIBILITY_ENABLE": "1"}  # force Firefox to expose its UI tree
+    env = dict(os.environ, MOZ_ACCESSIBILITY_ENABLE="1")  # MERGE env + force a11y on
     log.info("opening Firefox -> %s (accessibility forced ON)", URL)
-    subprocess.Popen(["firefox", URL],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    try:
+        subprocess.Popen(["firefox", URL],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
+    except Exception as e:
+        log.warning("auto-launch failed (%s) — please open Firefox manually", e)
     log.info("waiting 12s for Firefox to start...")
     time.sleep(12)
+    if not firefox_running():
+        log.warning("Firefox does not appear to be running — please open it manually now")
     print("\n>>> If Microsoft Copilot asks you to SIGN IN, sign in now in Firefox.")
     input(">>> When the chat page is ready (or you finished signing in), press Enter to continue. ")
     log.info("user ready, continuing")
@@ -234,7 +293,7 @@ def step_file_dialog():
 
 
 def step_compose():
-    node = find_node([""], roles=COMPOSE_ROLES)  # unnamed text area = message box
+    node = find_compose_input()
     if node:
         activate_node(node)
     else:
@@ -249,7 +308,8 @@ def step_send():
     if node:
         activate_node(node)
     else:
-        log.warning("AT did not find Send — pressing Enter")
+        log.warning("AT did not find Send — focusing Firefox and pressing Enter")
+        focus_firefox()
         press_enter()
 
 
@@ -272,6 +332,7 @@ def run(start_step):
     for name in STEPS[STEPS.index(start_step):]:
         log.info("=== step: %s ===", name)
         try:
+            pyautogui.screenshot().save(SHOTS / f"step_{name}.png")  # debug trail
             STEP_FN[name]()
         except pyautogui.FailSafeException:
             log.error("ABORTED by user (mouse moved to top-left corner)")
