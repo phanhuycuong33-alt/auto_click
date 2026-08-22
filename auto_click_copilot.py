@@ -91,6 +91,7 @@ def find_template(img, tpl_name, threshold=None, scales=None):
     tpl_path = TEMPLATES / f"{tpl_name}.png"
     if not tpl_path.exists():
         log.warning("template missing: %s", tpl_path)
+        log.warning("create it with: python3 capture_template.py %s", tpl_name)
         return None
     tpl = cv2.imread(str(tpl_path))
     if tpl is None:
@@ -159,10 +160,15 @@ def locate(tpl_name, img=None, ocr_words=()):
 def wait_for(tpl_name, timeout=30, ocr_words=(), interval=1.0):
     """Keep capturing until the button appears. Returns hit dict or None."""
     deadline = time.time() + timeout
+    last_log = 0.0
     while time.time() < deadline:
         hit = locate(tpl_name, img=capture(), ocr_words=ocr_words)
         if hit:
             return hit
+        now = time.time()
+        if now - last_log >= 10:
+            log.info("still looking for '%s' (%ds left)...", tpl_name, int(deadline - now))
+            last_log = now
         time.sleep(interval)
     log.warning("timeout waiting for '%s' (%ss)", tpl_name, timeout)
     return None
@@ -195,7 +201,9 @@ def annotate(img, hit, out_name):
 # ---------------------------------------------------------------- steps
 def step_open():
     log.info("opening Firefox -> %s", URL)
-    subprocess.Popen(["firefox", URL])
+    # silence snap-Firefox GTK warnings (harmless but noisy)
+    subprocess.Popen(["firefox", URL],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log.info("waiting 12s for Firefox to start...")
     time.sleep(12)
     print("\n>>> If Microsoft Copilot asks you to SIGN IN, sign in now in Firefox.")
