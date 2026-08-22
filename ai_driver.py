@@ -31,6 +31,7 @@ import sqlite3
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
 
@@ -167,8 +168,14 @@ def execute_command(page, line):
     return True
 
 
-def load_firefox_cookies():
-    """Microsoft + OpenAI + DeepSeek cookies from the user's real Firefox."""
+def load_firefox_cookies(extra_domains=()):
+    """AI-provider cookies + extra domains (e.g. your task site) from real Firefox."""
+    patterns = ["%microsoft%", "%live.com", "%openai%", "%deepseek%"]
+    for d in extra_domains:
+        d = d.strip().lower()
+        if d:
+            patterns.append(f"%{d}")
+    where = " OR ".join(f"host LIKE '{p}'" for p in patterns)
     candidates = []
     for base in (Path.home() / ".mozilla" / "firefox",
                  Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"):
@@ -186,8 +193,7 @@ def load_firefox_cookies():
     con = sqlite3.connect(f"file:{tmp}?immutable=1", uri=True)
     rows = con.execute(
         "SELECT name, value, host, path, expiry, isSecure, isHttpOnly "
-        "FROM moz_cookies WHERE host LIKE '%microsoft%' OR host LIKE '%live.com' "
-        "OR host LIKE '%openai%' OR host LIKE '%deepseek%'"
+        f"FROM moz_cookies WHERE {where}"
     ).fetchall()
     con.close()
     cookies = []
@@ -398,6 +404,9 @@ def main():
     ap.add_argument("--providers", default=",".join(DEFAULT_PROVIDERS),
                     help="fallback order, comma separated")
     ap.add_argument("--no-cookies", action="store_true", help="skip real-Firefox cookie import")
+    ap.add_argument("--cookie-domains", default="",
+                    help="extra login domains to import, comma separated, e.g. multipolls.com "
+                         "(the --url domain is added automatically)")
     args = ap.parse_args()
 
     if re.match(r"^\s*(task\s*:|i am automating this browser)", args.task, re.I):
@@ -409,21 +418,34 @@ def main():
     providers = [p.strip().lower() for p in args.providers.split(",") if p.strip()]
     prompt = INSTRUCTION.format(task=args.task)
 
+    # domains to import cookies for: the task site (from --url) + extras
+    extra_domains = []
+    if args.url:
+        host = urlsplit(args.url).hostname
+        if host:
+            extra_domains.append(host)
+            parts = host.split(".")
+            if len(parts) > 2:  # also the registrable domain, e.g. multipolls.com
+                extra_domains.append(".".join(parts[-2:]))
+    if args.cookie_domains:
+        extra_domains += [d.strip() for d in args.cookie_domains.split(",") if d.strip()]
+
     with sync_playwright() as p:
         ctx = p.firefox.launch_persistent_context(
             user_data_dir=str(PROFILE), headless=False,
             viewport={"width": 1400, "height": 900})
 
         if not args.no_cookies:
-            cookies = load_firefox_cookies()
+            cookies = load_firefox_cookies(extra_domains)
             if cookies:
                 try:
                     ctx.add_cookies(cookies)
-                    print(f"[i] imported {len(cookies)} session cookies (microsoft/openai/deepseek)")
+                    doms = sorted({c["domain"].lstrip(".") for c in cookies})
+                    print(f"[i] imported {len(cookies)} cookies from: {', '.join(doms[:12])}")
                 except Exception as e:
                     print(f"[!] cookie import failed: {e}")
             else:
-                print("[!] no cookies found — sign in to the providers in your normal Firefox first")
+                print("[!] no cookies found — sign in to the providers/task site in your normal Firefox first")
 
         ai_page = ctx.pages[0] if ctx.pages else ctx.new_page()
         task_page = ctx.new_page()
