@@ -539,11 +539,23 @@ def send_message(page, provider, text):
         textbox.fill(text)
     except Exception:
         textbox.click()
-        page.keyboard.type(text, delay=15)
+        page.keyboard.type(text, delay=10)
+    # verify it actually landed; retry with keyboard typing if empty
+    try:
+        if provider == "chatgpt":
+            filled = (textbox.input_value() or "").strip() or (textbox.inner_text() or "").strip()
+            if not filled:
+                textbox.click()
+                page.keyboard.type(text, delay=10)
+    except Exception:
+        pass
+    page.wait_for_timeout(400)
 
     sent = False
     if provider == "chatgpt":
-        for sel in ('[data-testid="send-button"]', 'button[aria-label="Send prompt"]'):
+        for sel in ('[data-testid="send-button"]',
+                    'button[aria-label="Send prompt"]',
+                    'button[aria-label="Send message"]'):
             try:
                 loc = page.locator(sel).first
                 if visible(loc, 1500):
@@ -553,9 +565,9 @@ def send_message(page, provider, text):
             except Exception:
                 continue
     if not sent:
-        for name in ["Send message", "Send", "Send prompt"]:
+        for name in ["Send", "Send message", "Send prompt"]:
             btn = page.get_by_role("button", name=name, exact=False).first
-            if visible(btn, 1500):
+            if visible(btn, 1200):
                 btn.click()
                 sent = True
                 break
@@ -648,12 +660,11 @@ def ask_provider(page, provider, image, task, prompt, attach=True):
             "deepseek": "https://chat.deepseek.com/"}
     print(f"\n[ai] asking {provider} ...")
     try:
-        page.goto(urls[provider])
-        page.wait_for_load_state("domcontentloaded")
+        page.goto(urls[provider], wait_until="domcontentloaded")  # chatgpt.com never finishes 'load'
     except Exception as e:
         print(f"[!] {provider}: navigation failed: {e}")
         return None
-    page.wait_for_timeout(1500)
+    page.wait_for_timeout(2000)
     if not wait_for_ready(page, provider):
         return None
     if attach:
