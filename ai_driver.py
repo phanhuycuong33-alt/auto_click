@@ -68,7 +68,10 @@ SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is t
 
 {schema}
 
+{profile}
+
 Rules:
+- Use the USER PROFILE for personal questions; for tricky ones (e.g. 'which district?') reason logically from the profile (e.g. street '14 Phan Van Hon' -> Binh Tan district, Ho Chi Minh City) and give a reasonable answer.
 - Only lines starting with [N] are CLICKABLE elements. Lines starting with * are page context (headings/text) — never click them.
 - Inspect the HTML structure to know the widget type: native <select>, custom dropdown, date picker (3 selects: day/month/year), radio group, checkbox, slider, autocomplete. Give the input in the format the element needs (e.g. date picker -> select day/month/year; text input -> fill).
 - If this is a survey/question form (input fields + a submit button), FILL the empty fields first — never click submit while fields are still empty. Fill with sensible answers.
@@ -103,6 +106,8 @@ FORM_INSTRUCTION = """You are controlling my browser via Playwright. This is a S
 
 {schema}
 
+{profile}
+
 Task: {task}
 
 Reply with ALL the commands needed to complete this form, ONE PER LINE, in order, e.g.:
@@ -113,6 +118,8 @@ click [6]
 Allowed commands: click [N] / select [N] with 'X' / fill [N] with 'X' / type 'X' / wait '3' / scroll 'down' or 'up' / goto 'https://url' / done
 
 Rules:
+- Use the USER PROFILE for personal questions (birthday, city, address, income...).
+- For tricky questions (e.g. 'which district do you live in?'), REASON from the profile: '14 Phan Van Hon' is in Binh Tan district, Ho Chi Minh City — give a logical, reasonable answer, never a random one.
 - Fill every empty required field, then click the submit/next button.
 - SKIP fields that already have a value='...' — do not re-fill them.
 - One command per line. No explanations, no numbering.
@@ -461,6 +468,21 @@ def fill_value(page, loc, value):
         print(f"[i] fill did not stick ('{got}') — typing via keyboard")
         loc.click(timeout=5000)
         page.keyboard.type(str(value), delay=15)
+
+
+def profile_context(profile):
+    """Human-readable summary of profile.json for the AI (ground truth for
+    personal questions; the AI reasons logically for tricky ones)."""
+    if not profile:
+        return ""
+    lines = ["USER PROFILE (use these to answer personal questions; reason logically for tricky ones):"]
+    for key, entry in profile.items():
+        if isinstance(entry, str):
+            v = entry
+        else:
+            v = entry.get("value", "")
+        lines.append(f"- {key.replace('_', ' ')}: {v}")
+    return "\n".join(lines)
 
 
 def auto_answer(page, schema_text, profile):
@@ -1246,6 +1268,7 @@ def main():
     profile = load_profile()
     if profile:
         print(f"[i] profile loaded: {len(profile)} auto-answers (birthday, address, income, ...)")
+    profile_ctx = profile_context(profile)
 
     # domains to import cookies for: the task site (from --url) + extras
     extra_domains = []
@@ -1390,10 +1413,10 @@ def main():
                             consecutive_fails = 0
                             break
                         if is_form:
-                            prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task)
+                            prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task, profile=profile_ctx)
                             print("[i] survey form mode — AI fills ALL fields in one response")
                         else:
-                            prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
+                            prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task, profile=profile_ctx)
                         if no_progress:
                             prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
                                              ") but the page looks identical — nothing happened. "
