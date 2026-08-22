@@ -114,7 +114,9 @@ Allowed commands: click [N] / select [N] with 'X' / fill [N] with 'X' / type 'X'
 
 Rules:
 - Fill every empty required field, then click the submit/next button.
+- SKIP fields that already have a value='...' — do not re-fill them.
 - One command per line. No explanations, no numbering.
+- Do not add 'done' until the whole task is truly finished.
 - When the whole task is fully done, reply exactly: done"""
 
 ATTACH_OPENERS = ["Add context", "Attach", "Attach files", "Attach media"]
@@ -237,6 +239,10 @@ SCHEMA_JS = """(startN) => {
             const opts = Array.from(el.options || []).slice(0, 15)
                 .map(o => clean(o.text).slice(0, 30)).filter(Boolean).join(', ');
             if (opts) d += " options='" + opts + "'";
+        }
+        if ((tag === 'input' || tag === 'textarea') && type !== 'password') {
+            const cur = clean(el.value).slice(0, 40);
+            if (cur) d += " value='" + cur + "'";
         }
         out.push(d);
         n++;
@@ -566,12 +572,13 @@ def execute_command(page, line):
         else:
             click_text(page, quoted(rest))
     elif cmd == "select":
-        fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
-        if not fm:
+        mw = re.search(r"\s+with\s+", rest, re.I)
+        if not mw:
             print(f"[!] bad select command: {line}")
             return True
-        target, value = fm.group(1), fm.group(2)
-        m = re.match(r"^\[(\d+)\]$", target.strip())
+        target = rest[:mw.start()].strip().strip("'\"")
+        value = rest[mw.end():].strip().strip("'\"")
+        m = re.match(r"^\[(\d+)\]$", target)
         loc = resolve_element(page, int(m.group(1))) if m else find_input(page, target)
         if loc is None:
             print(f"[!] no select found for '{target}'")
@@ -590,21 +597,22 @@ def execute_command(page, line):
                 except Exception:
                     pass
     elif cmd == "fill":
-        fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
-        if not fm:
+        mw = re.search(r"\s+with\s+", rest, re.I)
+        if not mw:
             print(f"[!] bad fill command: {line}")
             return True
-        field, value = fm.group(1), fm.group(2)
-        m = re.match(r"^\[(\d+)\]$", field.strip())
-        loc = resolve_element(page, int(m.group(1))) if m else find_input(page, field)
+        target = rest[:mw.start()].strip().strip("'\"")
+        value = rest[mw.end():].strip().strip("'\"")
+        m = re.match(r"^\[(\d+)\]$", target)
+        loc = resolve_element(page, int(m.group(1))) if m else find_input(page, target)
         if loc is None:
-            print(f"[!] no input found for '{field}'")
+            print(f"[!] no input found for '{target}'")
             return True
         try:
             fill_value(page, loc, value)
         except Exception:
             pass
-        print(f"[exec] fill '{field}' with '{value}'")
+        print(f"[exec] fill '{target}' with '{value}'")
     elif cmd == "type":
         page.keyboard.type(quoted(rest), delay=20)
         print(f"[exec] type '{quoted(rest)}'")
@@ -1408,7 +1416,13 @@ def main():
                             print(f"[{provider}] {reply!r}")
                             cmds = parse_commands(reply, exclude=prompt_round)
                             if cmds:
+                                url_before = task_page.url
+                                executed_done = False
                                 for cmd in cmds:
+                                    if cmd.split(None, 1)[0].lower() == "done":
+                                        executed_done = True
+                                        print("[cmd] done (AI finished its series — verifying task completion)")
+                                        continue
                                     print(f"[cmd] {cmd}")
                                     try:
                                         cont = execute_command(task_page, cmd)
@@ -1417,9 +1431,8 @@ def main():
                                         task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
                                         cont = True
                                     if not cont:
-                                        print("\n[done] task complete")
-                                        ctx.close()
-                                        return
+                                        executed_done = True
+                                        break
                                 # let redirects/navigations settle before the next round
                                 try:
                                     task_page.wait_for_load_state("domcontentloaded", timeout=15000)
@@ -1436,6 +1449,22 @@ def main():
                                     except Exception:
                                         pass
                                     print("[i] action opened a new tab — now controlling it")
+                                # 'done' only ends the run if the page really stopped changing
+                                if executed_done:
+                                    page_moved = task_page.url != url_before
+                                    if not page_moved:
+                                        try:
+                                            chk = SHOTS / f"done_check_{step}.png"
+                                            task_page.screenshot(path=str(chk))
+                                            page_moved = not images_similar(shot, chk, args.progress_threshold)
+                                        except Exception:
+                                            pass
+                                    if page_moved:
+                                        print("[i] page changed after 'done' — continuing the loop")
+                                    else:
+                                        print("\n[done] task complete (AI said done, page stable)")
+                                        ctx.close()
+                                        return
                                 done_round = True
                                 consecutive_fails = 0
                                 last_cmd = cmds[-1]
