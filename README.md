@@ -27,6 +27,28 @@ control, exactly like a person clicking.
 | `capture_template.py`   | helper to crop button reference images                        |
 | `templates/`         | your button PNGs go here (see `templates/README.md`)              |
 
+## Option B: keyboard / accessibility version (no templates at all)
+
+`copilot_keyboard.py` does the same flow but **never needs template crops**.
+It reads the buttons directly from Linux's accessibility tree (AT-SPI) and
+activates them with the keyboard; if that is unavailable it falls back to
+blind Tab-walking (tune `TAB_*` constants at the top of the file).
+
+```bash
+python3 copilot_keyboard.py --dump    # first: discover real button names
+python3 copilot_keyboard.py           # run the flow
+```
+
+If a button is not found, run `--dump`, check the printed names, and update
+the `*_NAMES` lists at the top of `copilot_keyboard.py`.
+
+## The two scripts compared
+
+| script | how it finds buttons | needs templates? |
+|---|---|---|
+| `auto_click_copilot.py` | screen capture + OpenCV matching | yes (crop once) |
+| `copilot_keyboard.py` | accessibility tree names + keyboard | no |
+
 ## Quickstart (host PC)
 
 ```bash
