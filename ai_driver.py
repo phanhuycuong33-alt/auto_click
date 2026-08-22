@@ -128,60 +128,107 @@ def images_similar(a_path, b_path, threshold=6.0):
         return False
 
 
-def extract_schema(page):
-    """Collect visible interactive elements as a numbered text schema.
-    Each element gets a data-ai='N' attribute so commands like
-    'click [5]' can resolve to it precisely."""
+SCHEMA_JS = """(startN) => {
+    const seen = new Set();
+    const out = [];
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const sels = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [onclick], [contenteditable="true"]';
+    let n = startN;
+    for (const el of document.querySelectorAll(sels)) {
+        if (el.tagName === 'IFRAME') continue;
+        if (el.closest('[aria-hidden="true"]')) continue;
+        if (el.closest('[data-testid*="toast" i], [class*="toast" i]')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) continue;
+        if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+        const st = getComputedStyle(el);
+        if (st.display === 'none' || st.visibility === 'hidden') continue;
+        const tag = el.tagName.toLowerCase();
+        const type = el.getAttribute('type') || '';
+        const aria = (el.getAttribute('aria-label') || '').trim();
+        const ph = (el.getAttribute('placeholder') || '').trim();
+        const name = (el.getAttribute('name') || '').trim();
+        const href = (el.getAttribute('href') || '').trim();
+        const text = (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+        const label = text || aria || ph || name || type || tag;
+        const key = tag + '|' + type + '|' + label + '|' + href;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        el.setAttribute('data-ai', String(n));
+        let d = '[' + n + '] ' + tag;
+        if (type) d += ' type=' + type;
+        if (aria) d += " aria='" + aria + "'";
+        if (ph) d += " placeholder='" + ph + "'";
+        if (name) d += " name='" + name + "'";
+        if (text) d += " text='" + text + "'";
+        if (href && href !== '#') d += " href='" + href.slice(0, 80) + "'";
+        out.push(d);
+        n++;
+        if (n >= startN + 60) break;
+    }
+    return { title: document.title, url: location.href, elements: out, next: n };
+}"""
+
+
+def frame_visible(fr, vw, vh):
+    """True if the frame's <iframe> element is on-screen in the parent."""
     try:
-        data = page.evaluate("""() => {
-            const seen = new Set();
-            const out = [];
-            const sels = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]';
-            let n = 0;
-            for (const el of document.querySelectorAll(sels)) {
-                const r = el.getBoundingClientRect();
-                if (r.width < 2 || r.height < 2) continue;
-                const st = getComputedStyle(el);
-                if (st.display === 'none' || st.visibility === 'hidden') continue;
-                const tag = el.tagName.toLowerCase();
-                const type = el.getAttribute('type') || '';
-                const aria = (el.getAttribute('aria-label') || '').trim();
-                const ph = (el.getAttribute('placeholder') || '').trim();
-                const name = (el.getAttribute('name') || '').trim();
-                const href = (el.getAttribute('href') || '').trim();
-                const text = (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
-                const label = text || aria || ph || name || type || tag;
-                const key = tag + '|' + type + '|' + label + '|' + href;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                el.setAttribute('data-ai', String(n));
-                let d = '[' + n + '] ' + tag;
-                if (type) d += ' type=' + type;
-                if (aria) d += " aria='" + aria + "'";
-                if (ph) d += " placeholder='" + ph + "'";
-                if (name) d += " name='" + name + "'";
-                if (text) d += " text='" + text + "'";
-                if (href && href !== '#') d += " href='" + href.slice(0, 80) + "'";
-                out.push(d);
-                n++;
-                if (n >= 60) break;
-            }
-            return { title: document.title, url: location.href, elements: out };
-        }""")
-        lines = [f"URL: {data['url']}", f"Title: {data['title']}"] + data["elements"]
-        return "\n".join(lines)
+        r = fr.frame_element().evaluate(
+            "el => { const r = el.getBoundingClientRect(); "
+            "return [r.left, r.top, r.right, r.bottom, r.width, r.height]; }")
+        left, top, right, bottom, w, h = r
+        if w < 2 or h < 2:
+            return False
+        if right < 0 or bottom < 0 or left > vw or top > vh:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def extract_schema(page):
+    """Collect visible interactive elements as a numbered text schema,
+    walking the main frame AND visible iframes (surveys live in iframes).
+    Each element gets data-ai='N' so 'click [5]' resolves precisely.
+    Junk (hidden iframes, toasts, aria-hidden, off-viewport) is filtered out."""
+    try:
+        frames = page.frames
+        vw = (page.viewport_size or {}).get("width") or 1400
+        vh = (page.viewport_size or {}).get("height") or 900
+        all_lines = []
+        n = 0
+        for idx, fr in enumerate(frames):
+            if idx > 0:
+                if not fr.url or fr.url.startswith("about:"):
+                    continue
+                if not frame_visible(fr, vw, vh):
+                    continue
+            data = fr.evaluate(SCHEMA_JS, n)
+            n = data["next"]
+            if idx == 0:
+                all_lines.append(f"URL: {data['url']}")
+                all_lines.append(f"Title: {data['title']}")
+            else:
+                host = (fr.url.split("/")[2] if "/" in fr.url else fr.url) or "frame"
+                all_lines.append(f"--- frame[{idx}] {host} ---")
+            all_lines.extend(data["elements"])
+            if n >= 120:
+                break
+        return "\n".join(all_lines)
     except Exception as e:
         print(f"[!] schema extraction failed: {e}")
         return "URL: unknown\nTitle: unknown\n(no elements)"
 
 
 def resolve_element(page, n):
-    try:
-        loc = page.locator(f'[data-ai="{n}"]').first
-        if loc.count():
-            return loc
-    except Exception:
-        pass
+    """Find data-ai=N in ANY frame (main + iframes)."""
+    for fr in page.frames:
+        try:
+            loc = fr.locator(f'[data-ai="{n}"]').first
+            if loc.count():
+                return loc
+        except Exception:
+            continue
     return None
 
 
@@ -199,8 +246,8 @@ def parse_command(reply, exclude=""):
 
 def click_text(page, text):
     """Click an element by text with a cascade of fallbacks.
-    Strips trailing prices ('Start survey $0.25' -> 'Start survey' -> ...)
-    and tries button, link, then raw text roles. Returns True on success."""
+    Strips trailing prices ('Start survey $0.25' -> 'Start survey'), tries
+    button/link/text in the main page, then searches iframes too."""
     candidates = [text]
     t = text
     while True:
@@ -212,8 +259,7 @@ def click_text(page, text):
     for cand in candidates:
         for role in ("button", "link"):
             try:
-                loc = page.get_by_role(role, name=cand, exact=False).first
-                loc.click(timeout=3000)
+                page.get_by_role(role, name=cand, exact=False).first.click(timeout=3000)
                 print(f"[exec] click '{cand}' (role={role})")
                 return True
             except Exception:
@@ -223,7 +269,23 @@ def click_text(page, text):
             print(f"[exec] click '{cand}' (by text)")
             return True
         except Exception:
-            continue
+            pass
+        # iframe fallback (survey content often lives in an iframe)
+        for fr in page.frames[1:]:
+            host = (fr.url.split("/")[2] if "/" in fr.url else "?")
+            for role in ("button", "link"):
+                try:
+                    fr.get_by_role(role, name=cand, exact=False).first.click(timeout=3000)
+                    print(f"[exec] click '{cand}' (iframe {host}, role={role})")
+                    return True
+                except Exception:
+                    continue
+            try:
+                fr.get_by_text(cand, exact=False).first.click(timeout=3000)
+                print(f"[exec] click '{cand}' (iframe {host}, by text)")
+                return True
+            except Exception:
+                continue
     print(f"[!] could not click '{text}' (tried: {candidates})")
     return False
 
@@ -843,6 +905,10 @@ def main():
                     if rmode == "schema":
                         schema_text = extract_schema(task_page)
                         prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
+                        if no_progress:
+                            prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
+                                             ") but the page looks identical — nothing happened. "
+                                             "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
                         attach = False
                         print("[i] mode: schema (page structure text — no image, no rate limit)")
                     else:
