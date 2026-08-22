@@ -53,7 +53,15 @@ def visible(loc, timeout=2000):
 
 def find_textbox(page):
     """Locate the message input with fallback selectors (Copilot UIs differ)."""
-    for sel in ('[role="textbox"]', "textarea"):
+    selectors = (
+        '[role="textbox"]',
+        "textarea",
+        '[contenteditable="true"]',
+        '[aria-label*="Ask"]',
+        '[aria-label*="prompt"]',
+        '[aria-label*="message"]',
+    )
+    for sel in selectors:
         try:
             loc = page.locator(sel)
             if loc.count():
