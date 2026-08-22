@@ -545,6 +545,36 @@ def wait_for_ready(page, provider, timeout=20):
     return False
 
 
+def type_into(page, textbox, text):
+    """Type multi-line text into a contenteditable WITHOUT pressing Enter
+    (Enter would send the message mid-prompt). Paste via clipboard, with a
+    Shift+Enter line-by-line fallback."""
+    textbox.click(timeout=5000)
+    page.wait_for_timeout(200)
+    try:
+        page.evaluate("""(t) => {
+            const ta = document.createElement('textarea');
+            ta.value = t;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+        }""", text)
+        page.keyboard.press("Control+v")
+        page.wait_for_timeout(400)
+        return
+    except Exception as e:
+        print(f"[!] clipboard paste failed ({e}) — typing line by line with Shift+Enter")
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        page.keyboard.type(line, delay=4)
+        if i < len(lines) - 1:
+            page.keyboard.press("Shift+Enter")  # newline without sending
+    page.wait_for_timeout(400)
+
+
 def send_message(page, provider, text):
     textbox = None
     if provider == "chatgpt":
@@ -577,8 +607,9 @@ def send_message(page, provider, text):
             textbox.click(timeout=5000)
             textbox.fill(text)
         else:
-            # contenteditable — press_sequentially focuses + types reliably
-            textbox.press_sequentially(text, delay=5)
+            # contenteditable — paste via clipboard: newlines stay newlines,
+            # NO Enter presses (Enter would send the message prematurely)
+            type_into(page, textbox, text)
     except Exception as e:
         print(f"[!] {provider}: composer click/fill failed: {e}")
         try:
@@ -591,10 +622,10 @@ def send_message(page, provider, text):
     try:
         filled = (textbox.input_value() or "").strip() or (textbox.inner_text() or "").strip()
         if not filled:
-            print(f"[!] {provider}: composer empty after typing — retrying with keyboard")
+            print(f"[!] {provider}: composer empty after typing — retrying")
             try:
                 textbox.click(timeout=5000)
-                page.keyboard.type(text, delay=10)
+                type_into(page, textbox, text)
             except Exception as e2:
                 print(f"[!] {provider}: retype failed: {e2}")
                 return False
