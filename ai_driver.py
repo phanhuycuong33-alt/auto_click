@@ -71,6 +71,7 @@ SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is t
 Rules:
 - Only lines starting with [N] are CLICKABLE elements. Lines starting with * are page context (headings/text) — never click them.
 - Inspect the HTML structure to know the widget type: native <select>, custom dropdown, date picker (3 selects: day/month/year), radio group, checkbox, slider, autocomplete. Give the input in the format the element needs (e.g. date picker -> select day/month/year; text input -> fill).
+- If this is a survey/question form (input fields + a submit button), FILL the empty fields first — never click submit while fields are still empty. Fill with sensible answers.
 - If a popup/modal is open, handle it first (close or accept it) before anything else.
 - Ignore logo/navigation links (href='/') unless there is nothing else useful.
 - Dropdowns/lists: use select [N] with 'Option Text' for <select> elements; for listed option items, click the right one directly with click [N].
@@ -392,6 +393,25 @@ def load_profile():
     return {}
 
 
+def fill_value(page, loc, value):
+    """Fill an input reliably: set value, VERIFY it stuck, and fall back to
+    keyboard typing (react-native-web controlled inputs sometimes ignore fill)."""
+    try:
+        loc.fill(str(value))
+    except Exception:
+        loc.click(timeout=5000)
+        page.keyboard.type(str(value), delay=15)
+        return
+    try:
+        got = (loc.input_value() or "").strip()
+    except Exception:
+        got = ""
+    if got != str(value).strip():
+        print(f"[i] fill did not stick ('{got}') — typing via keyboard")
+        loc.click(timeout=5000)
+        page.keyboard.type(str(value), delay=15)
+
+
 def auto_answer(page, schema_text, profile):
     """Fill common survey questions directly from profile.json — no AI needed.
     Handles text inputs, date inputs, native selects (incl. day/month/year
@@ -459,14 +479,20 @@ def auto_answer(page, schema_text, profile):
                 if mm:
                     itype = mm.group(1)
                 val = value
-                if itype == "date":
-                    dp = meta.get("date_parts") if isinstance(meta, dict) else None
-                    val = (dp or {}).get("iso", value)
-                loc.fill(val)
+                dp = meta.get("date_parts") if isinstance(meta, dict) else None
+                if itype == "date" and dp:
+                    val = dp.get("iso", value)
+                elif dp and "year" in hint:
+                    val = dp.get("year", value)          # birthday_year -> 1988
+                elif dp and "month" in hint:
+                    val = dp.get("month_name", value)
+                elif dp and "day" in hint:
+                    val = dp.get("day", value)
+                fill_value(page, loc, val)
                 print(f"[profile] fill [{n}] '{key}' = '{val}'")
                 filled_any = True
             elif tag == "textarea":
-                loc.fill(value)
+                fill_value(page, loc, value)
                 print(f"[profile] fill [{n}] '{key}' = '{value}'")
                 filled_any = True
             else:
@@ -530,10 +556,9 @@ def execute_command(page, line):
             print(f"[!] no input found for '{field}'")
             return True
         try:
-            loc.fill(value)
+            fill_value(page, loc, value)
         except Exception:
-            loc.click()
-            page.keyboard.type(value, delay=15)
+            pass
         print(f"[exec] fill '{field}' with '{value}'")
     elif cmd == "type":
         page.keyboard.type(quoted(rest), delay=20)
@@ -1252,7 +1277,7 @@ def main():
                 # --- progress check: did the page change since last round? ---
                 no_progress = False
                 if (last_shot is not None and last_cmd
-                        and last_cmd.split(None, 1)[0].lower() in ("click", "fill")
+                        and last_cmd.split(None, 1)[0].lower() in ("click",)
                         and images_similar(shot, last_shot, args.progress_threshold)):
                     no_progress = True
                     print(f"[!] no page change after '{last_cmd}' — will ask for a DIFFERENT action")
