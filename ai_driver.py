@@ -435,6 +435,23 @@ def extract_question(schema_text):
     return ""
 
 
+ERROR_MARKERS = ("lỗi", "không đúng", "chính xác", "error", "invalid", "wrong",
+                 "vui lòng", "định dạng", "ít nhất", "required", "bắt buộc",
+                 "không hợp lệ", "mismatch", "thử lại", "failed")
+
+
+def extract_errors(schema_text):
+    """Find error/warning text on the page (validation messages etc.) so the
+    AI knows WHY its last action failed."""
+    hits = []
+    for ln in schema_text.splitlines():
+        low = ln.lower()
+        if any(m in low for m in ERROR_MARKERS):
+            t = ln.strip().strip("'")[:180]
+            if t and t not in hits:
+                hits.append(t)
+    return hits[:4]
+
 QUESTION_EXTRACT_INSTRUCTION = """This is a SURVEY QUESTION FORM. Here is the page:
 
 {schema}
@@ -632,6 +649,8 @@ def auto_answer(page, schema_text, profile):
         if not m:
             continue
         n, tag = int(m.group(1)), m.group(2)
+        if " value='" in line:
+            continue  # field already has a value — don't re-fill
         hint = line.lower()
         hit = next(((a, k, v, meta) for a, k, v, meta in rules if a in hint), None)
         if hit is None:
@@ -1523,11 +1542,8 @@ def main():
                             pass
                         auto_filled = auto_answer(task_page, schema_text, profile)
                         if auto_filled:
-                            print("[i] profile auto-answers applied — skipping AI this round")
-                            task_page.wait_for_timeout(1200)
-                            done_round = True
-                            consecutive_fails = 0
-                            break
+                            print("[i] profile auto-answers applied — continuing the flow")
+                            task_page.wait_for_timeout(800)
                         # classify the page once per URL: command web vs survey form
                         if classified_url != task_page.url:
                             classify_prompt = CLASSIFY_INSTRUCTION.format(schema=schema_text, question=extract_question(schema_text)) + f"\n{marker}"
@@ -1584,9 +1600,15 @@ def main():
                             prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task,
                                                                      profile=profile_ctx, history=history_text)
                         if no_progress:
-                            prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
-                                             ") but the page looks identical — nothing happened. "
-                                             "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
+                            note = ("\n\nNOTE: I did what you suggested (" + last_cmd +
+                                    ") but the page looks identical — nothing happened.")
+                            errs = extract_errors(schema_text)
+                            if errs:
+                                note += "\nThe page shows an ERROR/WARNING: " + " | ".join(errs)
+                                note += ("\nCheck the HTML carefully to understand the field/button "
+                                         "properties and answer properly.")
+                            note += "\nDo NOT repeat that action. Suggest a DIFFERENT action."
+                            prompt_round += note
                         attach = False
                         print("[i] mode: schema (page structure text — no image, no rate limit)")
                     else:
