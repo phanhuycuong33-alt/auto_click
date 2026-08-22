@@ -9,7 +9,7 @@ Two tabs:
     and ONE provider is asked; if its reply is empty/unparseable, the next
     provider is tried automatically.
 
-Provider order (configurable): copilot -> chatgpt -> deepseek
+Provider order (configurable via --providers): chatgpt -> copilot -> deepseek
   - deepseek needs its "vision" tab switched on before attaching an image
     (handled automatically).
 
@@ -46,7 +46,7 @@ REAL_PROFILE_COPY = BASE / "pw-real-profile"
 PROFILE_MAX_AGE = 600  # seconds — reuse the profile copy if fresh enough
 
 DEFAULT_STEPS = None  # None = run forever until 'done' or Ctrl+C
-DEFAULT_PROVIDERS = ["copilot", "chatgpt", "deepseek"]
+DEFAULT_PROVIDERS = ["chatgpt", "copilot", "deepseek"]  # chatgpt first = main AI
 
 INSTRUCTION = """You are controlling my browser via Playwright. I just attached a screenshot of the current page.
 
