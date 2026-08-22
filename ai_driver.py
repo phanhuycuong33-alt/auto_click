@@ -195,62 +195,116 @@ def load_firefox_cookies(extra_domains=()):
             shutil.copy2(src, Path(str(tmp) + suffix))
     con = sqlite3.connect(f"file:{tmp}?immutable=1", uri=True)
     rows = con.execute(
-        "SELECT name, value, host, path, expiry, isSecure, isHttpOnly "
+        "SELECT name, value, host, path, expiry, isSecure, isHttpOnly, sameSite "
         f"FROM moz_cookies WHERE {where}"
     ).fetchall()
     con.close()
+    ss_map = {0: "None", 1: "Lax", 2: "Strict"}
     cookies = []
-    for name, value, host, path, expiry, isSecure, isHttpOnly in rows:
+    for name, value, host, path, expiry, isSecure, isHttpOnly, same_site in rows:
         if not value:
             continue
+        ss = ss_map.get(same_site, "Lax")
+        if ss == "None" and not isSecure:  # SameSite=None requires Secure
+            isSecure = 1
         cookies.append({"name": name, "value": value,
                         "domain": host if host.startswith(".") else "." + host,
                         "path": path or "/",
                         "expires": int(expiry) if expiry and expiry > 0 else -1,
-                        "secure": bool(isSecure), "httpOnly": bool(isHttpOnly)})
+                        "secure": bool(isSecure), "httpOnly": bool(isHttpOnly),
+                        "sameSite": ss})
     return cookies or None
 
 
 # ---------------------------------------------------------------- provider actions
-def extract_reply(page, provider, timeout=120):
+def extract_reply(page, provider, timeout=180):
+    """Wait for the newest provider message to finish streaming, return its text.
+    Tracks the 'Stop generating' button to know when generation finished."""
     selectors = REPLY_SELECTORS.get(provider, ())
     last_text, stable_since, started = "", time.time(), False
+    stop_seen = False
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        text = ""
+
+    def stop_visible():
+        try:
+            loc = page.locator('button:has-text("Stop")').first
+            return bool(loc.count()) and loc.is_visible()
+        except Exception:
+            return False
+
+    def current_text():
+        t = ""
         for sel in selectors:
             try:
                 loc = page.locator(sel)
                 n = loc.count()
                 if n:
-                    text = loc.nth(n - 1).inner_text()
+                    t = loc.nth(n - 1).inner_text()
                     break
             except Exception:
                 continue
-        if not text:  # generic catch-all
+        if not t:  # generic catch-all
             for sel in ('[data-content]', '[data-message-author-role="assistant"]', '.ds-markdown'):
                 try:
                     loc = page.locator(sel)
                     if loc.count():
-                        text = loc.nth(loc.count() - 1).inner_text()
+                        t = loc.nth(loc.count() - 1).inner_text()
                         break
                 except Exception:
                     continue
+        if t and t.strip() in ("Copilot said", "ChatGPT said", "Copilot said\n"):
+            return ""  # label-only stub, content still streaming
+        return t
+
+    while time.time() < deadline:
+        text = current_text()
+        if stop_visible():
+            stop_seen = True
         if text != last_text:
             if text:
                 started = True
             last_text, stable_since = text, time.time()
-        elif started and text and time.time() - stable_since > 4:
+        elif stop_seen and not stop_visible():
+            page.wait_for_timeout(2500)  # generation finished — settle
+            final = current_text()
+            if final:
+                return final
+            return last_text
+        elif started and text and time.time() - stable_since > 6:
             return text
         page.wait_for_timeout(1000)
     return last_text
 
 
-def check_signin(page, provider):
-    for name in SIGNIN_MARKERS:
-        if visible(page.get_by_role("button", name=name, exact=False).first, 2000):
-            print(f"[!] {provider}: sign-in page detected — sign in on your normal Firefox and re-run")
-            return True
+def provider_textbox(page, provider):
+    if provider == "chatgpt":
+        try:
+            loc = page.locator("#prompt-textarea")
+            if loc.count():
+                return loc.first
+        except Exception:
+            pass
+    return find_textbox(page)
+
+
+def wait_for_ready(page, provider, timeout=20):
+    """Wait until the provider page is usable. Returns True if logged in.
+    A visible textbox = logged in; a visible login button = sign-in required."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        tb = provider_textbox(page, provider)
+        if tb is not None and tb.count():
+            try:
+                if tb.is_visible():
+                    return True
+            except Exception:
+                return True
+        for name in SIGNIN_MARKERS:
+            if visible(page.get_by_role("button", name=name, exact=False).first, 1000):
+                print(f"[!] {provider}: sign-in page detected — sign in on your normal Firefox and re-run")
+                return False
+        page.wait_for_timeout(1500)
+    print(f"[!] {provider}: page not ready after {timeout}s")
     return False
 
 
@@ -387,7 +441,7 @@ def ask_provider(page, provider, image, task, prompt):
         print(f"[!] {provider}: navigation failed: {e}")
         return None
     page.wait_for_timeout(1500)
-    if check_signin(page, provider):
+    if not wait_for_ready(page, provider):
         return None
     if not attach_image(page, provider, image):
         return None
@@ -398,46 +452,60 @@ def ask_provider(page, provider, image, task, prompt):
 
 
 def load_firefox_localstorage(host):
-    """localStorage is why cookies sometimes aren't enough (sites like
-    multipolls keep the session there). Read it from Firefox's
-    webappsstore2 db and return (key, value) pairs for the given host."""
-    import json as _  # noqa
-    candidates = []
-    for base in (Path.home() / ".mozilla" / "firefox",
-                 Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"):
-        if base.is_dir():
-            candidates += sorted(base.glob("*/cookies.sqlite"))
-    if not candidates:
+    """localStorage/sessionStorage for the host from Firefox's webappsstore2."""
+    try:
+        candidates = []
+        for base in (Path.home() / ".mozilla" / "firefox",
+                     Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"):
+            if base.is_dir():
+                candidates += sorted(base.glob("*/cookies.sqlite"))
+        if not candidates:
+            print("[i] no Firefox profile found for localStorage")
+            return []
+        prof = max(candidates, key=lambda p: p.stat().st_mtime).parent
+        db = prof / "webappsstore.sqlite"
+        if not db.exists():
+            print("[i] no webappsstore.sqlite in profile")
+            return []
+        tmp = Path(tempfile.mkdtemp()) / "webappsstore.sqlite"
+        shutil.copy2(db, tmp)
+        for suffix in ("-wal", "-shm"):
+            src = Path(str(db) + suffix)
+            if src.exists():
+                shutil.copy2(src, Path(str(tmp) + suffix))
+        con = sqlite3.connect(f"file:{tmp}?immutable=1", uri=True)
+        rows = con.execute(
+            "SELECT key, value FROM webappsstore2 WHERE scope LIKE ?",
+            (f"%{host}%",)).fetchall()
+        if not rows:  # fallback: registrable domain
+            parts = host.split(".")
+            if len(parts) > 2:
+                rows = con.execute(
+                    "SELECT key, value FROM webappsstore2 WHERE scope LIKE ?",
+                    (f"%{'.'.join(parts[-2:])}%",)).fetchall()
+        con.close()
+        kv = [(k, v) for k, v in rows if k and v is not None]
+        if not kv:
+            print(f"[i] webappsstore2 has no entries for {host} "
+                  "(site may keep session only in cookies)")
+        return kv
+    except Exception as e:
+        print(f"[!] localStorage read failed: {e}")
         return []
-    prof = max(candidates, key=lambda p: p.stat().st_mtime).parent
-    db = prof / "webappsstore.sqlite"
-    if not db.exists():
-        return []
-    tmp = Path(tempfile.mkdtemp()) / "webappsstore.sqlite"
-    shutil.copy2(db, tmp)
-    for suffix in ("-wal", "-shm"):
-        src = Path(str(db) + suffix)
-        if src.exists():
-            shutil.copy2(src, Path(str(tmp) + suffix))
-    con = sqlite3.connect(f"file:{tmp}?immutable=1", uri=True)
-    rows = con.execute(
-        "SELECT key, value FROM webappsstore2 WHERE scope LIKE ?",
-        (f"%{host}%",)).fetchall()
-    con.close()
-    return [(k, v) for k, v in rows if k and v is not None]
 
 
 def inject_localstorage(page, host):
-    """Inject the real Firefox localStorage into the task page before it loads."""
+    """Inject real Firefox localStorage + sessionStorage before the page loads."""
     import json
     kv = load_firefox_localstorage(host)
     if not kv:
-        print(f"[i] no localStorage data found for {host}")
         return
     js = "\n".join(
-        f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});" for k, v in kv)
+        f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});\n"
+        f"sessionStorage.setItem({json.dumps(k)}, {json.dumps(v)});"
+        for k, v in kv)
     page.add_init_script(js)
-    print(f"[i] injected {len(kv)} localStorage keys for {host}")
+    print(f"[i] injected {len(kv)} storage keys for {host} (local + session)")
 
 
 def auto_login(page, username, password):
@@ -523,6 +591,9 @@ def main():
                     ctx.add_cookies(cookies)
                     doms = sorted({c["domain"].lstrip(".") for c in cookies})
                     print(f"[i] imported {len(cookies)} cookies from: {', '.join(doms[:12])}")
+                    mp = [c for c in cookies if "multipolls" in c["domain"].lower()]
+                    if mp:
+                        print(f"[i] of those, {len(mp)} multipolls.com cookies")
                 except Exception as e:
                     print(f"[!] cookie import failed: {e}")
             else:
@@ -538,6 +609,9 @@ def main():
             task_page.wait_for_load_state("domcontentloaded")
             if args.username:
                 auto_login(task_page, args.username, args.password or "")
+            task_page.wait_for_timeout(2500)
+            task_page.screenshot(path=str(SHOTS / "task_page.png"))
+            print(f"[i] task page screenshot: {SHOTS / 'task_page.png'}")
             print(f"[i] task page opened: {args.url}")
         else:
             print("[i] no --url given — commands that need the task page may fail;")
