@@ -159,6 +159,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser(description="Free web-chat -> OpenAI-compatible proxy")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="bind address (0.0.0.0 = reachable from other machines / Docker; "
+                         "127.0.0.1 = local only)")
     ap.add_argument("--provider", choices=["deepseek", "chatgpt", "copilot"],
                     default="deepseek")
     ap.add_argument("--mock", action="store_true",
@@ -168,8 +171,8 @@ def main():
     _state["provider"] = args.provider
     if not args.mock:
         print("[ai_provide] mode: real web chat via ai_driver machinery")
-    print(f"[ai_provide] listening on http://localhost:{args.port}/v1/chat/completions")
-    HTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    print(f"[ai_provide] listening on http://{args.host}:{args.port}/v1/chat/completions")
+    HTTPServer((args.host, args.port), Handler).serve_forever()
 
 
 if __name__ == "__main__":
