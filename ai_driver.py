@@ -127,7 +127,10 @@ def execute_command(page, line):
         try:
             page.get_by_role("button", name=text, exact=False).first.click(timeout=8000)
         except Exception:
-            page.get_by_text(text, exact=False).first.click(timeout=8000)
+            try:
+                page.get_by_role("link", name=text, exact=False).first.click(timeout=5000)
+            except Exception:
+                page.get_by_text(text, exact=False).first.click(timeout=8000)
         print(f"[exec] click '{text}'")
     elif cmd == "fill":
         fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
@@ -394,6 +397,82 @@ def ask_provider(page, provider, image, task, prompt):
     return extract_reply(page, provider)
 
 
+def load_firefox_localstorage(host):
+    """localStorage is why cookies sometimes aren't enough (sites like
+    multipolls keep the session there). Read it from Firefox's
+    webappsstore2 db and return (key, value) pairs for the given host."""
+    import json as _  # noqa
+    candidates = []
+    for base in (Path.home() / ".mozilla" / "firefox",
+                 Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"):
+        if base.is_dir():
+            candidates += sorted(base.glob("*/cookies.sqlite"))
+    if not candidates:
+        return []
+    prof = max(candidates, key=lambda p: p.stat().st_mtime).parent
+    db = prof / "webappsstore.sqlite"
+    if not db.exists():
+        return []
+    tmp = Path(tempfile.mkdtemp()) / "webappsstore.sqlite"
+    shutil.copy2(db, tmp)
+    for suffix in ("-wal", "-shm"):
+        src = Path(str(db) + suffix)
+        if src.exists():
+            shutil.copy2(src, Path(str(tmp) + suffix))
+    con = sqlite3.connect(f"file:{tmp}?immutable=1", uri=True)
+    rows = con.execute(
+        "SELECT key, value FROM webappsstore2 WHERE scope LIKE ?",
+        (f"%{host}%",)).fetchall()
+    con.close()
+    return [(k, v) for k, v in rows if k and v is not None]
+
+
+def inject_localstorage(page, host):
+    """Inject the real Firefox localStorage into the task page before it loads."""
+    import json
+    kv = load_firefox_localstorage(host)
+    if not kv:
+        print(f"[i] no localStorage data found for {host}")
+        return
+    js = "\n".join(
+        f"localStorage.setItem({json.dumps(k)}, {json.dumps(v)});" for k, v in kv)
+    page.add_init_script(js)
+    print(f"[i] injected {len(kv)} localStorage keys for {host}")
+
+
+def auto_login(page, username, password):
+    """Best-effort login: fill the first username/password form and submit."""
+    pwd = page.locator('input[type="password"]').first
+    try:
+        if not pwd.count():
+            print("[i] no login form detected — assuming already logged in")
+            return
+    except Exception:
+        return
+    print("[i] login form detected — filling credentials")
+    user = page.locator('input[type="text"], input[type="email"], '
+                        'input[name*="user" i], input[name*="email" i], '
+                        'input[id*="user" i], input[id*="email" i]').first
+    try:
+        if user.count():
+            user.fill(username)
+        pwd.fill(password)
+    except Exception as e:
+        print(f"[!] auto-login fill failed: {e}")
+        return
+    try:
+        btn = page.locator('button:has-text("Log in"), button:has-text("Sign in"), '
+                           'button:has-text("Login"), input[type="submit"]').first
+        if btn.count():
+            btn.click()
+        else:
+            pwd.press("Enter")
+    except Exception:
+        pwd.press("Enter")
+    page.wait_for_timeout(4000)
+    print("[i] login submitted — waited 4s")
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Drive the browser via Copilot/ChatGPT/DeepSeek vision")
@@ -407,6 +486,8 @@ def main():
     ap.add_argument("--cookie-domains", default="",
                     help="extra login domains to import, comma separated, e.g. multipolls.com "
                          "(the --url domain is added automatically)")
+    ap.add_argument("--username", default=None, help="login username (auto-fill if login form shows)")
+    ap.add_argument("--password", default=None, help="login password (with --username)")
     args = ap.parse_args()
 
     if re.match(r"^\s*(task\s*:|i am automating this browser)", args.task, re.I):
@@ -450,8 +531,13 @@ def main():
         ai_page = ctx.pages[0] if ctx.pages else ctx.new_page()
         task_page = ctx.new_page()
         if args.url:
+            host = urlsplit(args.url).hostname or ""
+            if host and not args.no_cookies:
+                inject_localstorage(task_page, host)
             task_page.goto(args.url)
             task_page.wait_for_load_state("domcontentloaded")
+            if args.username:
+                auto_login(task_page, args.username, args.password or "")
             print(f"[i] task page opened: {args.url}")
         else:
             print("[i] no --url given — commands that need the task page may fail;")
