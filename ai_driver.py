@@ -89,6 +89,34 @@ done
 Choose the single next best action for: {task}
 When the task is fully done, reply exactly: done"""
 
+CLASSIFY_INSTRUCTION = """You are controlling my browser via Playwright. Here is the CURRENT page:
+
+{schema}
+
+What kind of page is this? Reply with EXACTLY ONE line, one of:
+survey form     (a question/form page with input fields, selects, radio buttons and a submit/next button)
+command web     (a normal page with buttons/links to click, not a fill-in form)
+
+Just the one line, nothing else."""
+
+FORM_INSTRUCTION = """You are controlling my browser via Playwright. This is a SURVEY QUESTION FORM. Here is the current page:
+
+{schema}
+
+Task: {task}
+
+Reply with ALL the commands needed to complete this form, ONE PER LINE, in order, e.g.:
+fill [1] with '1990'
+fill [3] with 'Ho Chi Minh City'
+click [6]
+
+Allowed commands: click [N] / select [N] with 'X' / fill [N] with 'X' / type 'X' / wait '3' / scroll 'down' or 'up' / goto 'https://url' / done
+
+Rules:
+- Fill every empty required field, then click the submit/next button.
+- One command per line. No explanations, no numbering.
+- When the whole task is fully done, reply exactly: done"""
+
 ATTACH_OPENERS = ["Add context", "Attach", "Attach files", "Attach media"]
 
 REPLY_SELECTORS = {
@@ -317,6 +345,23 @@ def parse_command(reply, exclude=""):
         if re.match(r"^(click|select|fill|type|wait|scroll|goto|done)\b", line, re.I):
             return line
     return None
+
+
+def parse_commands(reply, exclude=""):
+    """ALL command lines in the AI's reply, in order (multi-command forms)."""
+    if exclude:
+        if reply.strip() == exclude.strip():
+            return []
+        if reply[:80] == exclude[:80] and len(reply) > 0.8 * len(exclude):
+            return []
+    out = []
+    for line in reply.strip().splitlines():
+        line = line.strip().lstrip("*-`# ")
+        if not line:
+            continue
+        if re.match(r"^(click|select|fill|type|wait|scroll|goto|done)\b", line, re.I):
+            out.append(line)
+    return out
 
 
 def click_text(page, text):
@@ -1015,6 +1060,15 @@ def ask_provider(page, provider, image, task, prompt, attach=True, marker=""):
     return extract_reply(page, provider)
 
 
+def ask_once(page, providers, prompt, marker):
+    """Ask providers in order for a plain text reply (no command execution)."""
+    for provider in providers:
+        reply = ask_provider(page, provider, None, "", prompt, attach=False, marker=marker)
+        if reply and reply.strip():
+            return reply, provider
+    return None, None
+
+
 def load_firefox_localstorage(host):
     """localStorage/sessionStorage for the host from Firefox's webappsstore2."""
     try:
@@ -1244,6 +1298,7 @@ def main():
         step = 0
         consecutive_fails = 0
         last_shot, last_cmd = None, None
+        classified_url, is_form = None, False
         try:
             while True:
                 step += 1
@@ -1309,7 +1364,28 @@ def main():
                             done_round = True
                             consecutive_fails = 0
                             break
-                        prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
+                        # classify the page once per URL: command web vs survey form
+                        if classified_url != task_page.url:
+                            classify_prompt = CLASSIFY_INSTRUCTION.format(schema=schema_text) + f"\n{marker}"
+                            reply_c, prov_c = ask_once(ai_page, providers, classify_prompt, marker)
+                            if reply_c:
+                                low = reply_c.lower()
+                                is_form = ("form" in low and "command" not in low)
+                                print(f"[{prov_c}] page type: {reply_c.strip()[:80]}")
+                            else:
+                                is_form = ("input" in schema_text or "select" in schema_text
+                                           or "textarea" in schema_text)
+                                print(f"[i] classify failed — heuristic: {'form' if is_form else 'command web'}")
+                            classified_url = task_page.url
+                            print(f"[i] page classified: {'SURVEY FORM' if is_form else 'COMMAND WEB'}")
+                            done_round = True
+                            consecutive_fails = 0
+                            break
+                        if is_form:
+                            prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task)
+                            print("[i] survey form mode — AI fills ALL fields in one response")
+                        else:
+                            prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
                         if no_progress:
                             prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
                                              ") but the page looks identical — nothing happened. "
@@ -1330,25 +1406,26 @@ def main():
                                              args.task, prompt_round, attach=attach, marker=marker)
                         if reply and reply.strip():
                             print(f"[{provider}] {reply!r}")
-                            cmd = parse_command(reply, exclude=prompt_round)
-                            if cmd:
-                                print(f"[cmd] {cmd}")
-                                try:
-                                    cont = execute_command(task_page, cmd)
-                                except Exception as e:
-                                    print(f"[!] command raised: {e} — continuing (will re-ask)")
-                                    task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
-                                    cont = True
+                            cmds = parse_commands(reply, exclude=prompt_round)
+                            if cmds:
+                                for cmd in cmds:
+                                    print(f"[cmd] {cmd}")
+                                    try:
+                                        cont = execute_command(task_page, cmd)
+                                    except Exception as e:
+                                        print(f"[!] command raised: {e} — continuing")
+                                        task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
+                                        cont = True
+                                    if not cont:
+                                        print("\n[done] task complete")
+                                        ctx.close()
+                                        return
                                 # let redirects/navigations settle before the next round
                                 try:
                                     task_page.wait_for_load_state("domcontentloaded", timeout=15000)
                                 except Exception:
                                     pass
-                                if not cont:
-                                    print("\n[done] task complete")
-                                    ctx.close()
-                                    return
-                                # if the action opened a new tab (target=_blank), follow it
+                                # if any action opened a new tab (target=_blank), follow it
                                 new_pages = [pg for pg in ctx.pages if pg not in (ai_page, task_page)]
                                 if new_pages:
                                     old = task_page
@@ -1361,7 +1438,7 @@ def main():
                                     print("[i] action opened a new tab — now controlling it")
                                 done_round = True
                                 consecutive_fails = 0
-                                last_cmd = cmd
+                                last_cmd = cmds[-1]
                                 break
                             else:
                                 print(f"[!] {provider} replied but no command found — next provider")
