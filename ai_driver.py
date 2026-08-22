@@ -70,7 +70,11 @@ SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is t
 
 {profile}
 
+{history}
+
 Rules:
+- NEVER copy example values from question text (e.g. 'ví dụ. 1990' is just an example) — use the USER PROFILE (birth year 1988).
+- Stay consistent with PREVIOUS STEPS — do not repeat or contradict what was already done.
 - Use the USER PROFILE for personal questions; for tricky ones (e.g. 'which district?') reason logically from the profile (e.g. street '14 Phan Van Hon' -> Binh Tan district, Ho Chi Minh City) and give a reasonable answer.
 - Only lines starting with [N] are CLICKABLE elements. Lines starting with * are page context (headings/text) — never click them.
 - Inspect the HTML structure to know the widget type: native <select>, custom dropdown, date picker (3 selects: day/month/year), radio group, checkbox, slider, autocomplete. Give the input in the format the element needs (e.g. date picker -> select day/month/year; text input -> fill).
@@ -108,6 +112,8 @@ FORM_INSTRUCTION = """You are controlling my browser via Playwright. This is a S
 
 {profile}
 
+{history}
+
 Task: {task}
 
 Reply with ALL the commands needed to complete this form, ONE PER LINE, in order, e.g.:
@@ -118,8 +124,10 @@ click [6]
 Allowed commands: click [N] / select [N] with 'X' / fill [N] with 'X' / type 'X' / wait '3' / scroll 'down' or 'up' / goto 'https://url' / done
 
 Rules:
-- Use the USER PROFILE for personal questions (birthday, city, address, income...).
+- Use the USER PROFILE for personal questions (birthday, city, address, income...). The user's BIRTH YEAR is 1988.
+- NEVER copy example values from the question text (e.g. 'ví dụ. 1990' is only an example — the real birth year is 1988).
 - For tricky questions (e.g. 'which district do you live in?'), REASON from the profile: '14 Phan Van Hon' is in Binh Tan district, Ho Chi Minh City — give a logical, reasonable answer, never a random one.
+- Stay consistent with PREVIOUS STEPS — do not re-fill or contradict what was already done.
 - Fill every empty required field, then click the submit/next button.
 - SKIP fields that already have a value='...' — do not re-fill them.
 - One command per line. No explanations, no numbering.
@@ -1330,6 +1338,12 @@ def main():
         consecutive_fails = 0
         last_shot, last_cmd = None, None
         classified_url, is_form = None, False
+        history = []
+
+        def remember(msg):
+            history.append(msg)
+            if len(history) > 25:
+                del history[0]
         try:
             while True:
                 step += 1
@@ -1352,6 +1366,7 @@ def main():
                     except Exception:
                         pass
                     print("[i] adopted a new popup/tab as the task page")
+                    remember(f"round {step}: adopted popup -> {task_page.url}")
                 if step == 1 and args.image:
                     shot = Path(args.image).resolve()
                 else:
@@ -1412,11 +1427,17 @@ def main():
                             done_round = True
                             consecutive_fails = 0
                             break
+                        history_text = ""
+                        if history:
+                            history_text = ("PREVIOUS STEPS (what you already did — stay consistent):\n"
+                                            + "\n".join(f"- step {i+1}: {h}" for i, h in enumerate(history)))
                         if is_form:
-                            prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task, profile=profile_ctx)
+                            prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task,
+                                                                   profile=profile_ctx, history=history_text)
                             print("[i] survey form mode — AI fills ALL fields in one response")
                         else:
-                            prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task, profile=profile_ctx)
+                            prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task,
+                                                                     profile=profile_ctx, history=history_text)
                         if no_progress:
                             prompt_round += ("\n\nNOTE: I did what you suggested (" + last_cmd +
                                              ") but the page looks identical — nothing happened. "
@@ -1453,6 +1474,9 @@ def main():
                                         print(f"[!] command raised: {e} — continuing")
                                         task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
                                         cont = True
+                                        remember(f"round {step}: {cmd} FAILED")
+                                    else:
+                                        remember(f"round {step}: {cmd}")
                                     if not cont:
                                         executed_done = True
                                         break
@@ -1472,6 +1496,7 @@ def main():
                                     except Exception:
                                         pass
                                     print("[i] action opened a new tab — now controlling it")
+                                remember(f"round {step}: page -> {task_page.url}")
                                 # 'done' only ends the run if the page really stopped changing
                                 if executed_done:
                                     page_moved = task_page.url != url_before
