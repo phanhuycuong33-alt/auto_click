@@ -9,7 +9,7 @@ Two tabs:
     and ONE provider is asked; if its reply is empty/unparseable, the next
     provider is tried automatically.
 
-Provider order (configurable via --providers): chatgpt -> deepseek -> copilot
+Provider order (configurable via --providers): deepseek -> chatgpt -> copilot
   - deepseek needs its "vision" tab switched on before attaching an image
     (handled automatically).
 
@@ -47,7 +47,7 @@ REAL_PROFILE_COPY = BASE / "pw-real-profile"
 PROFILE_MAX_AGE = 600  # seconds — reuse the profile copy if fresh enough
 
 DEFAULT_STEPS = None  # None = run forever until 'done' or Ctrl+C
-DEFAULT_PROVIDERS = ["chatgpt", "deepseek", "copilot"]  # chatgpt first = main AI
+DEFAULT_PROVIDERS = ["deepseek", "chatgpt", "copilot"]  # deepseek first = main AI
 
 INSTRUCTION = """You are controlling my browser via Playwright. I just attached a screenshot of the current page.
 
@@ -699,10 +699,8 @@ def wait_for_ready(page, provider, timeout=20):
 
 
 def type_into(page, textbox, text):
-    """Type multi-line text into a contenteditable WITHOUT pressing Enter
-    (Enter would send the message mid-prompt). Methods in order:
-    1) execCommand copy + Ctrl+V  2) navigator.clipboard + Ctrl+V
-    3) line-by-line typing with Shift+Enter for newlines."""
+    """Paste multi-line text into a contenteditable via clipboard (fast, no
+    Enter keypresses, no slow line-by-line typing). Returns True on success."""
     textbox.click(timeout=5000)
     page.wait_for_timeout(300)
     # method 1: execCommand copy + paste
@@ -739,15 +737,8 @@ def type_into(page, textbox, text):
             return True
     except Exception as e:
         print(f"[!] navigator.clipboard failed: {e}")
-    # method 3: type line by line, Shift+Enter for newlines
-    print("[i] clipboard unavailable — typing line by line (Shift+Enter for newlines)")
-    lines = text.split("\n")
-    for i, line in enumerate(lines):
-        page.keyboard.type(line, delay=3)
-        if i < len(lines) - 1:
-            page.keyboard.press("Shift+Enter")
-    page.wait_for_timeout(500)
-    return True
+    print("[!] clipboard paste unavailable — cannot fill composer (skipping provider)")
+    return False
 
 
 def send_message(page, provider, text):
@@ -784,7 +775,8 @@ def send_message(page, provider, text):
         else:
             # contenteditable — paste via clipboard: newlines stay newlines,
             # NO Enter presses (Enter would send the message prematurely)
-            type_into(page, textbox, text)
+            if not type_into(page, textbox, text):
+                return False
     except Exception as e:
         print(f"[!] {provider}: composer click/fill failed: {e}")
         try:
@@ -964,6 +956,9 @@ def ask_provider(page, provider, image, task, prompt, attach=True, marker=""):
     page.wait_for_timeout(2000)
     if not wait_for_ready(page, provider):
         return None
+    if provider in ("chatgpt", "deepseek"):
+        print(f"[i] {provider}: waiting 10s for the composer to fully load...")
+        page.wait_for_timeout(10000)
     try:
         if attach:
             if not attach_image(page, provider, image):
