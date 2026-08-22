@@ -142,39 +142,52 @@ SCHEMA_JS = """(startN) => {
     const out = [];
     const ctx = [];
     const vw = window.innerWidth, vh = window.innerHeight;
-    const sels = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [role="checkbox"], [role="radio"], [role="tab"], [role="menuitem"], [onclick], [contenteditable="true"]';
+    const MAX = startN + 100;
     let n = startN;
-    for (const el of document.querySelectorAll(sels)) {
-        if (el.tagName === 'IFRAME') continue;
-        if (el.disabled) continue;
-        if (el.closest('[aria-hidden="true"]')) continue;
-        if (el.closest('[data-testid*="toast" i], [class*="toast" i]')) continue;
+    const clean = s => (s || '').replace(/\\s+/g, ' ').trim();
+    const consider = (el) => {
+        if (n >= MAX) return;
+        if (el.tagName === 'IFRAME') return;
+        if (el.disabled) return;
+        if (el.closest('[aria-hidden="true"]')) return;
+        if (el.closest('[data-testid*="toast" i], [class*="toast" i]')) return;
         const r = el.getBoundingClientRect();
-        if (r.width < 2 || r.height < 2) continue;
-        if (r.bottom < -1000 || r.top > vh + 3000 || r.right < -500 || r.left > vw + 500) continue;
+        if (r.width < 2 || r.height < 2) return;
+        if (r.bottom < -1000 || r.top > vh + 3000 || r.right < -500 || r.left > vw + 500) return;
         const st = getComputedStyle(el);
-        if (st.display === 'none' || st.visibility === 'hidden') continue;
+        if (st.display === 'none' || st.visibility === 'hidden') return;
         const tag = el.tagName.toLowerCase();
+        const role = (el.getAttribute('role') || '').toLowerCase();
+        if (role === 'presentation' || role === 'none') return;
+        const isHard = tag === 'a' || tag === 'button' || tag === 'input' || tag === 'textarea' || tag === 'select'
+            || el.getAttribute('contenteditable') === 'true' || el.hasAttribute('onclick') || !!role;
+        const pointer = st.cursor === 'pointer';
+        if (!isHard && !pointer) return;  // clickable divs/spans (cursor:pointer) are included
         const type = el.getAttribute('type') || '';
-        const aria = (el.getAttribute('aria-label') || '').trim();
-        const ph = (el.getAttribute('placeholder') || '').trim();
-        const name = (el.getAttribute('name') || '').trim();
-        const href = (el.getAttribute('href') || '').trim();
-        const title = (el.getAttribute('title') || '').trim();
-        const alt = ((el.querySelector('img') || {}).alt || '').trim();
-        const val = (el.getAttribute('value') || '').trim().slice(0, 30);
-        const testid = (el.getAttribute('data-testid') || '').trim();
-        const text = (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
-        const label = text || aria || ph || name || type || tag;
-        const key = tag + '|' + type + '|' + label + '|' + href;
-        if (seen.has(key)) continue;
+        const aria = clean(el.getAttribute('aria-label'));
+        const ph = clean(el.getAttribute('placeholder'));
+        const name = clean(el.getAttribute('name'));
+        const href = clean(el.getAttribute('href'));
+        const title = clean(el.getAttribute('title'));
+        const alt = clean((el.querySelector('img') || {}).alt);
+        const val = clean(el.getAttribute('value')).slice(0, 30);
+        const testid = clean(el.getAttribute('data-testid'));
+        const text = clean(el.innerText).slice(0, 60);
+        let labelTxt = '';
+        try {
+            if (el.labels && el.labels.length) labelTxt = clean(el.labels[0].innerText).slice(0, 40);
+        } catch (e) {}
+        const key = tag + '|' + type + '|' + (text || aria || ph || name || type || tag) + '|' + href + '|' + pointer;
+        if (seen.has(key)) return;
         seen.add(key);
         el.setAttribute('data-ai', String(n));
         let d = '[' + n + '] ' + tag;
         if (type) d += ' type=' + type;
+        if (role) d += ' role=' + role;
         if (text) d += " text='" + text + "'";
         if (aria && aria !== text) d += " aria='" + aria + "'";
         if (ph) d += " placeholder='" + ph + "'";
+        if (labelTxt) d += " label='" + labelTxt + "'";
         if (name) d += " name='" + name + "'";
         if (val && (tag === 'button' || type === 'submit' || type === 'button')) d += " value='" + val + "'";
         if (title && title !== text) d += " title='" + title + "'";
@@ -183,14 +196,15 @@ SCHEMA_JS = """(startN) => {
         if (href && href !== '#') d += " href='" + href.slice(0, 60) + "'";
         out.push(d);
         n++;
-        if (n >= startN + 60) break;
-    }
+    };
+    document.querySelectorAll('a, button, input, textarea, select, [contenteditable="true"], [onclick], [role]').forEach(consider);
+    if (n < MAX) document.querySelectorAll('div, span').forEach(consider);
     for (const h of document.querySelectorAll('h1, h2, h3')) {
-        const t = (h.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
+        const t = clean(h.innerText).slice(0, 80);
         if (t) ctx.push('* ' + h.tagName.toLowerCase() + " '" + t + "'");
     }
-    let bodyText = ((document.body && document.body.innerText) || '').replace(/\\s+/g, ' ').trim();
-    if (bodyText.length > 300) bodyText = bodyText.slice(0, 300) + '...';
+    let bodyText = clean(document.body && document.body.innerText);
+    if (bodyText.length > 600) bodyText = bodyText.slice(0, 600) + '...';
     if (bodyText) ctx.push("* page text: '" + bodyText + "'");
     return { title: document.title, url: location.href, elements: out, ctx: ctx, next: n };
 }"""
@@ -239,7 +253,7 @@ def extract_schema(page):
                 all_lines.append(f"--- frame[{idx}] {host} ---")
             all_lines.extend(data.get("ctx", []))
             all_lines.extend(data["elements"])
-            if n >= 120:
+            if n >= 200:
                 break
         return "\n".join(all_lines)
     except Exception as e:
