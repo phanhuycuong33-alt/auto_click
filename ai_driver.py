@@ -102,13 +102,17 @@ def visible(loc, timeout=2000):
 
 
 def find_textbox(page):
-    selectors = ('[role="textbox"]', "textarea", '[contenteditable="true"]',
+    selectors = ('[contenteditable="true"]', '[role="textbox"]', "textarea",
                  '[aria-label*="Ask"]', '[aria-label*="prompt"]', '[aria-label*="message"]')
     for sel in selectors:
         try:
-            loc = page.locator(sel)
+            loc = page.locator(sel).last
             if loc.count():
-                return loc.last
+                try:
+                    if loc.is_visible():
+                        return loc
+                except Exception:
+                    return loc
         except Exception:
             continue
     return None
@@ -146,7 +150,7 @@ SCHEMA_JS = """(startN) => {
         if (el.closest('[data-testid*="toast" i], [class*="toast" i]')) continue;
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) continue;
-        if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
+        if (r.bottom < -1000 || r.top > vh + 3000 || r.right < -500 || r.left > vw + 500) continue;
         const st = getComputedStyle(el);
         if (st.display === 'none' || st.visibility === 'hidden') continue;
         const tag = el.tagName.toLowerCase();
@@ -523,12 +527,20 @@ def wait_for_ready(page, provider, timeout=20):
 def send_message(page, provider, text):
     textbox = None
     if provider == "chatgpt":
-        try:
-            loc = page.locator("#prompt-textarea")
-            if loc.count():
-                textbox = loc.first
-        except Exception:
-            pass
+        # the visible composer is a contenteditable div; the textarea is a hidden a11y fallback
+        for sel in ('[contenteditable="true"]', '#prompt-textarea', '[role="textbox"]'):
+            try:
+                loc = page.locator(sel).last
+                if loc.count():
+                    try:
+                        if loc.is_visible():
+                            textbox = loc
+                            break
+                    except Exception:
+                        textbox = loc
+                        break
+            except Exception:
+                continue
     if textbox is None:
         textbox = find_textbox(page)
     if textbox is None:
@@ -667,10 +679,18 @@ def ask_provider(page, provider, image, task, prompt, attach=True):
     page.wait_for_timeout(2000)
     if not wait_for_ready(page, provider):
         return None
-    if attach:
-        if not attach_image(page, provider, image):
+    try:
+        if attach:
+            if not attach_image(page, provider, image):
+                return None
+        if not send_message(page, provider, prompt):
             return None
-    if not send_message(page, provider, prompt):
+    except Exception as e:
+        print(f"[!] {provider}: send/attach raised: {e}")
+        try:
+            page.screenshot(path=str(SHOTS / f"debug_{provider}.png"))
+        except Exception:
+            pass
         return None
     print(f"[i] waiting for {provider} reply...")
     return extract_reply(page, provider)
