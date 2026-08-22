@@ -2,8 +2,13 @@
   "birthday": {
     "value": "8/12/1988",
     "iso": "1988-12-08",
-    "date_parts": { "day": "8", "month": "12", "month_name": "Dec", "year": "1988" },
+    "date_parts": { "day": "8", "month": "12", "month_name": "Dec", "month_vn": "Tháng mười hai", "year": "1988" },
     "aliases": ["birthday", "date of birth", "dob", "birth date", "ngay sinh"]
+  },
+  "birth_month": {
+    "value": "December",
+    "vn": "Tháng mười hai",
+    "aliases": ["birth month", "sinh vào tháng", "tháng mấy", "born in month", "born month", "month were you born"]
   },
   "gender": {
     "value": "Male",

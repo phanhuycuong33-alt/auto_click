@@ -227,7 +227,7 @@ SCHEMA_JS = """(startN) => {
         const alt = clean((el.querySelector('img') || {}).alt);
         const val = clean(el.getAttribute('value')).slice(0, 30);
         const testid = clean(el.getAttribute('data-testid'));
-        const text = clean(el.innerText).slice(0, 60);
+        const text = (clean(el.textContent) || clean(el.innerText)).slice(0, 60);
         // react-native-web clickables often have NO role/tabindex/cursor — they
         // are plain divs with text. Accept them unless they wrap a real control.
         const hasInteractiveKid = el.querySelector('button, a, input, textarea, select, [role="button"], [role="link"], [onclick]') !== null;
@@ -573,7 +573,10 @@ def auto_answer(page, schema_text, profile):
                 dp = meta.get("date_parts") if isinstance(meta, dict) else None
                 if not done and dp:
                     if any(mon in opts_lower for mon in MONTH_NAMES):
-                        loc.select_option(label=dp["month_name"])
+                        try:
+                            loc.select_option(label=dp["month_name"])
+                        except Exception:
+                            loc.select_option(label=dp.get("month_vn", dp["month_name"]))
                     elif re.search(r"\b(19|20)\d\d\b", opts_lower):
                         loc.select_option(label=dp["year"])
                     else:
@@ -603,9 +606,12 @@ def auto_answer(page, schema_text, profile):
                 print(f"[profile] fill [{n}] '{key}' = '{value}'")
                 filled_any = True
             else:
-                # radio / checkbox / div / li option — click the matching one
+                # radio / checkbox / div / li / span option — click the matching one
                 if click_text(page, value):
                     print(f"[profile] click '{value}' for '{key}'")
+                    filled_any = True
+                elif isinstance(meta, dict) and meta.get("vn") and click_text(page, meta["vn"]):
+                    print(f"[profile] click '{meta['vn']}' for '{key}'")
                     filled_any = True
         except Exception as e:
             print(f"[!] profile answer failed for '{key}' on [{n}]: {e}")
@@ -1526,6 +1532,20 @@ def main():
                                 # 'done' only ends the run if the page really stopped changing
                                 if executed_done:
                                     page_moved = task_page.url != url_before
+                                    if not page_moved:
+                                        # ignore 'done' while unanswered form fields remain
+                                        try:
+                                            chk_schema = _extract_schema_once(task_page)
+                                            unfilled = [ln for ln in chk_schema.splitlines()
+                                                        if ("input" in ln or "select" in ln or "textarea" in ln)
+                                                        and " value='" not in ln
+                                                        and "placeholder='" not in ln
+                                                        and "submit" not in ln]
+                                            if unfilled:
+                                                print(f"[i] 'done' ignored — {len(unfilled)} unanswered field(s) remain")
+                                                page_moved = True
+                                        except Exception:
+                                            pass
                                     if not page_moved:
                                         try:
                                             chk = SHOTS / f"done_check_{step}.png"
