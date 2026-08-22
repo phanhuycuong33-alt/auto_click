@@ -42,7 +42,7 @@ PROFILE = BASE / "pw-profile"
 REAL_PROFILE_COPY = BASE / "pw-real-profile"
 PROFILE_MAX_AGE = 600  # seconds — reuse the profile copy if fresh enough
 
-DEFAULT_STEPS = 5
+DEFAULT_STEPS = None  # None = run forever until 'done' or Ctrl+C
 DEFAULT_PROVIDERS = ["copilot", "chatgpt", "deepseek"]
 
 INSTRUCTION = """You are controlling my browser via Playwright. I just attached a screenshot of the current page.
@@ -614,7 +614,8 @@ def main():
     ap.add_argument("task", help="the task/goal for the AI (plain words)")
     ap.add_argument("--url", default=None, help="task page to open in the automation tab")
     ap.add_argument("--image", default=None, help="image for round 1 (default: screenshot of task tab)")
-    ap.add_argument("--steps", type=int, default=DEFAULT_STEPS, help="max loop rounds")
+    ap.add_argument("--steps", type=int, default=DEFAULT_STEPS,
+                    help="max loop rounds (default: infinite until 'done' or Ctrl+C)")
     ap.add_argument("--providers", default=",".join(DEFAULT_PROVIDERS),
                     help="fallback order, comma separated")
     ap.add_argument("--no-cookies", action="store_true", help="skip real-Firefox cookie import")
@@ -695,48 +696,61 @@ def main():
             print("[i] no --url given — commands that need the task page may fail;")
             print("    use --url to open the page you want automated")
 
-        for step in range(1, args.steps + 1):
-            print(f"\n=== round {step}/{args.steps} ===")
-            if step == 1 and args.image:
-                shot = Path(args.image).resolve()
-            else:
-                shot = SHOTS / f"round_{step}.png"
-                task_page.bring_to_front()
-                task_page.screenshot(path=str(shot))
-            print(f"[i] screenshot: {shot}")
-
-            done_round = False
-            for provider in providers:
-                reply = ask_provider(ai_page, provider, shot, args.task, prompt)
-                if reply and reply.strip():
-                    print(f"[{provider}] {reply!r}")
-                    cmd = parse_command(reply, exclude=prompt)
-                    if cmd:
-                        print(f"[cmd] {cmd}")
-                        try:
-                            cont = execute_command(task_page, cmd)
-                        except Exception as e:
-                            print(f"[!] command raised: {e} — continuing (will re-ask next round)")
-                            task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
-                            cont = True
-                        if not cont:
-                            print("\n[done] task complete")
-                            ctx.close()
-                            return
-                        done_round = True
-                        break
-                    else:
-                        print(f"[!] {provider} replied but no command found — trying next provider")
+        step = 0
+        consecutive_fails = 0
+        try:
+            while True:
+                step += 1
+                if args.steps and step > args.steps:
+                    print(f"\n[info] reached --steps {args.steps} limit — stopping")
+                    break
+                print(f"\n=== round {step} ===")
+                if step == 1 and args.image:
+                    shot = Path(args.image).resolve()
                 else:
-                    print(f"[!] {provider} returned nothing — trying next provider")
-            if not done_round:
-                shot_dbg = SHOTS / f"debug_round_{step}.png"
-                ai_page.screenshot(path=str(shot_dbg))
-                print(f"[!] all providers failed this round — debug: {shot_dbg}")
-                break
-            task_page.wait_for_timeout(1500)
+                    shot = SHOTS / f"round_{step}.png"
+                    task_page.bring_to_front()
+                    task_page.screenshot(path=str(shot))
+                print(f"[i] screenshot: {shot}")
 
-        print("\n[done] loop finished — check the browser / screenshots/")
+                done_round = False
+                for provider in providers:
+                    reply = ask_provider(ai_page, provider, shot, args.task, prompt)
+                    if reply and reply.strip():
+                        print(f"[{provider}] {reply!r}")
+                        cmd = parse_command(reply, exclude=prompt)
+                        if cmd:
+                            print(f"[cmd] {cmd}")
+                            try:
+                                cont = execute_command(task_page, cmd)
+                            except Exception as e:
+                                print(f"[!] command raised: {e} — continuing (will re-ask)")
+                                task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
+                                cont = True
+                            if not cont:
+                                print("\n[done] task complete")
+                                ctx.close()
+                                return
+                            done_round = True
+                            consecutive_fails = 0
+                            break
+                        else:
+                            print(f"[!] {provider} replied but no command found — next provider")
+                    else:
+                        print(f"[!] {provider} returned nothing — next provider")
+                if not done_round:
+                    consecutive_fails += 1
+                    if consecutive_fails == 1:
+                        shot_dbg = SHOTS / f"debug_round_{step}.png"
+                        ai_page.screenshot(path=str(shot_dbg))
+                        print(f"[!] all providers failed — debug: {shot_dbg}")
+                    print(f"[!] round {step} failed ({consecutive_fails} in a row) — "
+                          "retrying forever; Ctrl+C to stop")
+                task_page.wait_for_timeout(1500)
+        except KeyboardInterrupt:
+            print("\n[cancelled] stopped by user (Ctrl+C)")
+
+        print("\n[finished] check the browser / screenshots/")
 
 
 if __name__ == "__main__":
