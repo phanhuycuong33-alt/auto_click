@@ -62,6 +62,23 @@ done
 Choose the single next best action for: {task}
 When the task is fully done, reply exactly: done"""
 
+SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is the CURRENT page structure (visible interactive elements):
+
+{schema}
+
+Reply with ONLY ONE line, one of these formats:
+click 'button text'   (or click [N] using the element number)
+fill 'field' with 'value'   (or fill [N] with 'value')
+type 'text'
+wait '3'
+scroll 'down' or 'up'
+goto 'https://url'
+done
+
+Choose the single next best action for: {task}
+Prefer element numbers [N] when the text is ambiguous.
+When the task is fully done, reply exactly: done"""
+
 ATTACH_OPENERS = ["Add context", "Attach", "Attach files", "Attach media"]
 
 REPLY_SELECTORS = {
@@ -109,6 +126,63 @@ def images_similar(a_path, b_path, threshold=6.0):
         return diff < threshold
     except Exception:
         return False
+
+
+def extract_schema(page):
+    """Collect visible interactive elements as a numbered text schema.
+    Each element gets a data-ai='N' attribute so commands like
+    'click [5]' can resolve to it precisely."""
+    try:
+        data = page.evaluate("""() => {
+            const seen = new Set();
+            const out = [];
+            const sels = 'a, button, input, textarea, select, [role="button"], [role="link"], [role="textbox"], [onclick], [tabindex]';
+            let n = 0;
+            for (const el of document.querySelectorAll(sels)) {
+                const r = el.getBoundingClientRect();
+                if (r.width < 2 || r.height < 2) continue;
+                const st = getComputedStyle(el);
+                if (st.display === 'none' || st.visibility === 'hidden') continue;
+                const tag = el.tagName.toLowerCase();
+                const type = el.getAttribute('type') || '';
+                const aria = (el.getAttribute('aria-label') || '').trim();
+                const ph = (el.getAttribute('placeholder') || '').trim();
+                const name = (el.getAttribute('name') || '').trim();
+                const href = (el.getAttribute('href') || '').trim();
+                const text = (el.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+                const label = text || aria || ph || name || type || tag;
+                const key = tag + '|' + type + '|' + label + '|' + href;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                el.setAttribute('data-ai', String(n));
+                let d = '[' + n + '] ' + tag;
+                if (type) d += ' type=' + type;
+                if (aria) d += " aria='" + aria + "'";
+                if (ph) d += " placeholder='" + ph + "'";
+                if (name) d += " name='" + name + "'";
+                if (text) d += " text='" + text + "'";
+                if (href && href !== '#') d += " href='" + href.slice(0, 80) + "'";
+                out.push(d);
+                n++;
+                if (n >= 60) break;
+            }
+            return { title: document.title, url: location.href, elements: out };
+        }""")
+        lines = [f"URL: {data['url']}", f"Title: {data['title']}"] + data["elements"]
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[!] schema extraction failed: {e}")
+        return "URL: unknown\nTitle: unknown\n(no elements)"
+
+
+def resolve_element(page, n):
+    try:
+        loc = page.locator(f'[data-ai="{n}"]').first
+        if loc.count():
+            return loc
+    except Exception:
+        pass
+    return None
 
 
 def parse_command(reply, exclude=""):
@@ -172,14 +246,24 @@ def execute_command(page, line):
     cmd, rest = m.group(1).lower(), m.group(2).strip()
 
     if cmd == "click":
-        click_text(page, quoted(rest))
+        m = re.match(r"^\[(\d+)\]$", rest.strip())
+        if m:
+            loc = resolve_element(page, int(m.group(1)))
+            if loc is not None:
+                loc.click(timeout=8000)
+                print(f"[exec] click element [{m.group(1)}]")
+            else:
+                print(f"[!] element [{m.group(1)}] not found (schema stale?)")
+        else:
+            click_text(page, quoted(rest))
     elif cmd == "fill":
         fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
         if not fm:
             print(f"[!] bad fill command: {line}")
             return True
         field, value = fm.group(1), fm.group(2)
-        loc = find_input(page, field)
+        m = re.match(r"^\[(\d+)\]$", field.strip())
+        loc = resolve_element(page, int(m.group(1))) if m else find_input(page, field)
         if loc is None:
             print(f"[!] no input found for '{field}'")
             return True
@@ -472,8 +556,9 @@ def attach_image(page, provider, image):
         return False
 
 
-def ask_provider(page, provider, image, task, prompt):
-    """One round on one provider. Returns reply text or None."""
+def ask_provider(page, provider, image, task, prompt, attach=True):
+    """One round on one provider. attach=False = schema mode (no image).
+    Returns reply text or None."""
     urls = {"copilot": "https://copilot.microsoft.com/",
             "chatgpt": "https://chatgpt.com/",
             "deepseek": "https://chat.deepseek.com/"}
@@ -487,8 +572,9 @@ def ask_provider(page, provider, image, task, prompt):
     page.wait_for_timeout(1500)
     if not wait_for_ready(page, provider):
         return None
-    if not attach_image(page, provider, image):
-        return None
+    if attach:
+        if not attach_image(page, provider, image):
+            return None
     if not send_message(page, provider, prompt):
         return None
     print(f"[i] waiting for {provider} reply...")
@@ -645,6 +731,9 @@ def main():
                          "(slower to be robust; only for testing)")
     ap.add_argument("--refresh-profile", action="store_true",
                     help="force a fresh copy of the real Firefox profile")
+    ap.add_argument("--mode", choices=["auto", "schema", "image"], default="auto",
+                    help="how the AI sees the page: schema (text only, no image rate limits), "
+                         "image (screenshot), auto (image first, schema fallback)")
     ap.add_argument("--progress-threshold", type=float, default=6.0,
                     help="mean pixel diff below which the page counts as 'unchanged' "
                          "(progress detection)")
@@ -748,43 +837,61 @@ def main():
                                     ") but the page looks identical — nothing happened. "
                                     "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
 
+                round_modes = ["image", "schema"] if args.mode == "auto" else [args.mode]
                 done_round = False
-                for provider in providers:
-                    reply = ask_provider(ai_page, provider, shot, args.task, prompt_round)
-                    if reply and reply.strip():
-                        print(f"[{provider}] {reply!r}")
-                        cmd = parse_command(reply, exclude=prompt_round)
-                        if cmd:
-                            print(f"[cmd] {cmd}")
-                            try:
-                                cont = execute_command(task_page, cmd)
-                            except Exception as e:
-                                print(f"[!] command raised: {e} — continuing (will re-ask)")
-                                task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
-                                cont = True
-                            if not cont:
-                                print("\n[done] task complete")
-                                ctx.close()
-                                return
-                            # if the action opened a new tab (target=_blank), follow it
-                            new_pages = [pg for pg in ctx.pages if pg not in (ai_page, task_page)]
-                            if new_pages:
-                                old = task_page
-                                task_page = new_pages[0]
-                                task_page.wait_for_load_state("domcontentloaded")
-                                try:
-                                    old.close()
-                                except Exception:
-                                    pass
-                                print("[i] action opened a new tab — now controlling it")
-                            done_round = True
-                            consecutive_fails = 0
-                            last_cmd = cmd
-                            break
-                        else:
-                            print(f"[!] {provider} replied but no command found — next provider")
+                for rmode in round_modes:
+                    if rmode == "schema":
+                        schema_text = extract_schema(task_page)
+                        prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task)
+                        attach = False
+                        print("[i] mode: schema (page structure text — no image, no rate limit)")
                     else:
-                        print(f"[!] {provider} returned nothing — next provider")
+                        prompt_round = prompt
+                        if no_progress:
+                            prompt_round = (prompt + "\n\nNOTE: I did what you suggested (" + last_cmd +
+                                            ") but the page looks identical — nothing happened. "
+                                            "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
+                        attach = True
+                        print("[i] mode: image (screenshot)")
+                    for provider in providers:
+                        reply = ask_provider(ai_page, provider, shot if attach else None,
+                                             args.task, prompt_round, attach=attach)
+                        if reply and reply.strip():
+                            print(f"[{provider}] {reply!r}")
+                            cmd = parse_command(reply, exclude=prompt_round)
+                            if cmd:
+                                print(f"[cmd] {cmd}")
+                                try:
+                                    cont = execute_command(task_page, cmd)
+                                except Exception as e:
+                                    print(f"[!] command raised: {e} — continuing (will re-ask)")
+                                    task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
+                                    cont = True
+                                if not cont:
+                                    print("\n[done] task complete")
+                                    ctx.close()
+                                    return
+                                # if the action opened a new tab (target=_blank), follow it
+                                new_pages = [pg for pg in ctx.pages if pg not in (ai_page, task_page)]
+                                if new_pages:
+                                    old = task_page
+                                    task_page = new_pages[0]
+                                    task_page.wait_for_load_state("domcontentloaded")
+                                    try:
+                                        old.close()
+                                    except Exception:
+                                        pass
+                                    print("[i] action opened a new tab — now controlling it")
+                                done_round = True
+                                consecutive_fails = 0
+                                last_cmd = cmd
+                                break
+                            else:
+                                print(f"[!] {provider} replied but no command found — next provider")
+                        else:
+                            print(f"[!] {provider} returned nothing — next provider")
+                    if done_round:
+                        break
                 if not done_round:
                     consecutive_fails += 1
                     if consecutive_fails == 1:
