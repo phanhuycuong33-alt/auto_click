@@ -226,11 +226,8 @@ def frame_visible(fr, vw, vh):
         return False
 
 
-def extract_schema(page):
-    """Collect visible interactive elements as a numbered text schema,
-    walking the main frame AND visible iframes (surveys live in iframes).
-    Each element gets data-ai='N' so 'click [5]' resolves precisely.
-    Junk (hidden iframes, toasts, aria-hidden, off-viewport) is filtered out."""
+def _extract_schema_once(page):
+    """One pass: collect visible interactive elements (main frame + iframes)."""
     try:
         frames = page.frames
         vw = (page.viewport_size or {}).get("width") or 1400
@@ -259,6 +256,21 @@ def extract_schema(page):
     except Exception as e:
         print(f"[!] schema extraction failed: {e}")
         return "URL: unknown\nTitle: unknown\n(no elements)"
+
+
+def extract_schema(page):
+    """Schema with patience: if the page is mid-redirect/blank (0 clickable
+    elements), wait and re-extract a few times before giving up."""
+    for attempt in range(1, 7):
+        text = _extract_schema_once(page)
+        elem_count = sum(1 for ln in text.splitlines() if ln.startswith("["))
+        if elem_count > 0 or attempt == 6:
+            if elem_count == 0:
+                print("[i] schema has 0 clickable elements — page may be a redirect/blank")
+            return text
+        print(f"[i] no clickable elements yet (loading/redirecting?) — retrying ({attempt}/6)")
+        page.wait_for_timeout(3000)
+    return text
 
 
 def resolve_element(page, n):
@@ -1114,6 +1126,11 @@ def main():
                                     print(f"[!] command raised: {e} — continuing (will re-ask)")
                                     task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
                                     cont = True
+                                # let redirects/navigations settle before the next round
+                                try:
+                                    task_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                                except Exception:
+                                    pass
                                 if not cont:
                                     print("\n[done] task complete")
                                     ctx.close()
