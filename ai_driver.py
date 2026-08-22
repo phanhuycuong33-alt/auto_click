@@ -73,6 +73,7 @@ SCHEMA_INSTRUCTION = """You are controlling my browser via Playwright. Here is t
 {history}
 
 Rules:
+- For each field, read its question='...' text. PERSONAL INFO questions -> USER PROFILE; SURVEY/OPINION questions -> reasonable knowledge-based answer (hợp lý).
 - NEVER copy example values from question text (e.g. 'ví dụ. 1990' is just an example) — use the USER PROFILE (birth year 1988).
 - Stay consistent with PREVIOUS STEPS — do not repeat or contradict what was already done.
 - Use the USER PROFILE for personal questions; for tricky ones (e.g. 'which district?') reason logically from the profile (e.g. street '14 Phan Van Hon' -> Binh Tan district, Ho Chi Minh City) and give a reasonable answer.
@@ -124,6 +125,9 @@ click [6]
 Allowed commands: click [N] / select [N] with 'X' / fill [N] with 'X' / type 'X' / wait '3' / scroll 'down' or 'up' / goto 'https://url' / done
 
 Rules:
+- For each field, read its question='...' text.
+- PERSONAL INFO questions (birthday, age, address, income, family, occupation...) -> use the USER PROFILE.
+- SURVEY/OPINION questions -> answer from general knowledge with a REASONABLE, sensible answer (hợp lý) — never random, never contradictory.
 - Use the USER PROFILE for personal questions (birthday, city, address, income...). The user's BIRTH YEAR is 1988.
 - NEVER copy example values from the question text (e.g. 'ví dụ. 1990' is only an example — the real birth year is 1988).
 - For tricky questions (e.g. 'which district do you live in?'), REASON from the profile: '14 Phan Van Hon' is in Binh Tan district, Ho Chi Minh City — give a logical, reasonable answer, never a random one.
@@ -258,6 +262,21 @@ SCHEMA_JS = """(startN) => {
         if ((tag === 'input' || tag === 'textarea') && type !== 'password') {
             const cur = clean(el.value).slice(0, 40);
             if (cur) d += " value='" + cur + "'";
+        }
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+            let q = '';
+            try {
+                if (el.labels && el.labels.length) q = clean(el.labels[0].innerText).slice(0, 80);
+            } catch (e) {}
+            if (!q) {
+                let p = el.parentElement;
+                for (let i = 0; i < 3 && p && !q; i++) {
+                    const t = clean(p.innerText);
+                    if (t && t.length < 120 && t !== text) q = t;
+                    p = p.parentElement;
+                }
+            }
+            if (q) d += " question='" + q + "'";
         }
         out.push(d);
         n++;
@@ -460,12 +479,18 @@ def load_profile():
 
 
 def fill_value(page, loc, value):
-    """Fill an input reliably: set value, VERIFY it stuck, and fall back to
-    keyboard typing (react-native-web controlled inputs sometimes ignore fill)."""
+    """Fill an input reliably: clear existing text, set value, VERIFY it
+    stuck, and fall back to clear+keyboard typing (react-native-web
+    controlled inputs sometimes ignore fill)."""
+    try:
+        loc.fill("")
+    except Exception:
+        pass
     try:
         loc.fill(str(value))
     except Exception:
         loc.click(timeout=5000)
+        page.keyboard.press("Control+a")  # select any existing text first
         page.keyboard.type(str(value), delay=15)
         return
     try:
@@ -473,8 +498,9 @@ def fill_value(page, loc, value):
     except Exception:
         got = ""
     if got != str(value).strip():
-        print(f"[i] fill did not stick ('{got}') — typing via keyboard")
+        print(f"[i] fill did not stick ('{got}') — clearing and typing via keyboard")
         loc.click(timeout=5000)
+        page.keyboard.press("Control+a")
         page.keyboard.type(str(value), delay=15)
 
 
