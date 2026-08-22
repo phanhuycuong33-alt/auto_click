@@ -49,6 +49,35 @@ the `*_NAMES` lists at the top of `copilot_keyboard.py`.
 | `auto_click_copilot.py` | screen capture + OpenCV matching | yes (crop once) |
 | `copilot_keyboard.py` | accessibility tree names + keyboard | no |
 
+## Option C: Playwright + Firefox (recommended — most reliable)
+
+`copilot_playwright.py` drives the **real Firefox** in a visible window and
+attaches the image **directly** — no templates, no screen capture, no native
+file dialog, no tab-walking. It cannot get stuck on the dialog because there
+is no dialog: the file is handed straight to the upload control.
+
+```bash
+# one-time install (besides ./install.sh):
+pip install playwright
+playwright install firefox
+playwright install-deps firefox
+
+# run:
+python3 copilot_playwright.py                     # screenshot + "what is this"
+python3 copilot_playwright.py --image photo.png   # attach a specific file
+```
+
+First run: sign in to Copilot in the opened window. The session is saved in
+`./pw-profile`, so later runs start already signed in.
+
+## The three scripts compared
+
+| script | how it finds buttons | needs templates? | file dialog? | reliability |
+|---|---|---|---|---|
+| `auto_click_copilot.py` | screen capture + OpenCV | yes (crop once) | native (typed path) | medium |
+| `copilot_keyboard.py` | accessibility tree names + keyboard / Tab | no | native (typed path) | medium-low |
+| `copilot_playwright.py` | real UI lookups by name | no | **none** (fed directly) | **high** |
+
 ## Quickstart (host PC)
 
 ```bash
