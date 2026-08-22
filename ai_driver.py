@@ -260,11 +260,17 @@ def resolve_element(page, n):
 
 
 def parse_command(reply, exclude=""):
+    """Find the last command-looking line in the AI's reply.
+    Only a FULL echo of our own prompt is rejected (substring matching was
+    too aggressive: 'scroll \'down\'' appears inside our format examples)."""
+    if exclude:
+        if reply.strip() == exclude.strip():
+            return None
+        if reply[:80] == exclude[:80] and len(reply) > 0.8 * len(exclude):
+            return None  # the AI echoed our whole prompt back
     for line in reversed(reply.strip().splitlines()):
         line = line.strip().lstrip("*-`# ")
         if not line:
-            continue
-        if exclude and line in exclude:
             continue
         if re.match(r"^(click|fill|type|wait|scroll|goto|done)\b", line, re.I):
             return line
