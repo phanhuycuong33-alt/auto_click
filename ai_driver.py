@@ -9,7 +9,7 @@ Two tabs:
     and ONE provider is asked; if its reply is empty/unparseable, the next
     provider is tried automatically.
 
-Provider order (configurable via --providers): chatgpt -> copilot -> deepseek
+Provider order (configurable via --providers): chatgpt -> deepseek -> copilot
   - deepseek needs its "vision" tab switched on before attaching an image
     (handled automatically).
 
@@ -47,7 +47,7 @@ REAL_PROFILE_COPY = BASE / "pw-real-profile"
 PROFILE_MAX_AGE = 600  # seconds — reuse the profile copy if fresh enough
 
 DEFAULT_STEPS = None  # None = run forever until 'done' or Ctrl+C
-DEFAULT_PROVIDERS = ["chatgpt", "copilot", "deepseek"]  # chatgpt first = main AI
+DEFAULT_PROVIDERS = ["chatgpt", "deepseek", "copilot"]  # chatgpt first = main AI
 
 INSTRUCTION = """You are controlling my browser via Playwright. I just attached a screenshot of the current page.
 
@@ -553,19 +553,37 @@ def send_message(page, provider, text):
     if textbox is None:
         print(f"[!] {provider}: message input not found")
         return False
-    textbox.click()
+
     try:
-        textbox.fill(text)
+        tag = textbox.evaluate("el => el.tagName.toLowerCase()")
     except Exception:
-        textbox.click()
-        page.keyboard.type(text, delay=10)
-    # verify it actually landed; retry with keyboard typing if empty
+        tag = None
     try:
-        if provider == "chatgpt":
-            filled = (textbox.input_value() or "").strip() or (textbox.inner_text() or "").strip()
-            if not filled:
-                textbox.click()
+        if tag in ("textarea", "input"):
+            textbox.click(timeout=5000)
+            textbox.fill(text)
+        else:
+            # contenteditable — press_sequentially focuses + types reliably
+            textbox.press_sequentially(text, delay=5)
+    except Exception as e:
+        print(f"[!] {provider}: composer click/fill failed: {e}")
+        try:
+            page.screenshot(path=str(SHOTS / f"debug_{provider}_composer.png"))
+        except Exception:
+            pass
+        return False
+    page.wait_for_timeout(500)
+    # verify text actually landed
+    try:
+        filled = (textbox.input_value() or "").strip() or (textbox.inner_text() or "").strip()
+        if not filled:
+            print(f"[!] {provider}: composer empty after typing — retrying with keyboard")
+            try:
+                textbox.click(timeout=5000)
                 page.keyboard.type(text, delay=10)
+            except Exception as e2:
+                print(f"[!] {provider}: retype failed: {e2}")
+                return False
     except Exception:
         pass
     page.wait_for_timeout(400)
