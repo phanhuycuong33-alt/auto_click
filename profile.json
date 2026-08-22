@@ -3,7 +3,7 @@
     "value": "8/12/1988",
     "iso": "1988-12-08",
     "date_parts": { "day": "8", "month": "12", "month_name": "Dec", "month_vn": "Tháng mười hai", "year": "1988" },
-    "aliases": ["birthday", "date of birth", "dob", "birth date", "ngay sinh"]
+    "aliases": ["birthday", "date of birth", "dob", "birth date", "ngay sinh", "sinh vào ngày", "birth day"]
   },
   "birth_month": {
     "value": "December",
@@ -24,7 +24,7 @@
   },
   "zip_code": {
     "value": "700000",
-    "aliases": ["zip code", "zipcode", "zip", "postal code", "postcode"]
+    "aliases": ["zip code", "zipcode", "zip", "postal code", "postcode", "mã bưu điện", "bưu điện"]
   },
   "street_address": {
     "value": "14 Phan Van Hon",

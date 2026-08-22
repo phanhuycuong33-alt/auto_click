@@ -119,6 +119,8 @@ The survey QUESTION is: {question}
 
 {history}
 
+{personal}
+
 Task: {task}
 
 Reply with ALL the commands needed to complete this form, ONE PER LINE, in order, e.g.:
@@ -129,6 +131,7 @@ click [6]
 Allowed commands: click [N] / select [N] with 'X' / fill [N] with 'X' / type 'X' / wait '3' / scroll 'down' or 'up' / goto 'https://url' / done
 
 Rules:
+- PERSONAL INFO ANSWERS above are the EXACT user values — use them VERBATIM, never invent different ones (the user's birthday is 8/12/1988, never 5/8/1988).
 - For each field, read its question='...' text.
 - PERSONAL INFO questions (birthday, age, address, income, family, occupation...) -> use the USER PROFILE.
 - SURVEY/OPINION questions -> answer from general knowledge with a REASONABLE, sensible answer (hợp lý) — never random, never contradictory.
@@ -431,6 +434,60 @@ def extract_question(schema_text):
             return ln.strip()[:140]
     return ""
 
+
+QUESTION_EXTRACT_INSTRUCTION = """This is a SURVEY QUESTION FORM. Here is the page:
+
+{schema}
+
+{profile}
+
+Extract the question(s) on this page. Reply ONE LINE PER QUESTION, exactly this format:
+Q: <the question text> | K: personal | A: <exact answer from USER PROFILE if it is personal info, else leave A empty>
+or for non-personal questions:
+Q: <the question text> | K: survey
+
+Rules:
+- K is 'personal' when the question asks about birthday, age, address, zip, income, family, gender, occupation...
+- For personal questions, put the EXACT profile value in A (e.g. birthday is 8/12/1988, zip 700000).
+- For survey/opinion questions, leave A empty.
+- No other text."""
+
+
+def parse_questions(reply):
+    """Parse the AI's question extraction into (question, kind, answer) list."""
+    out = []
+    for line in reply.strip().splitlines():
+        m = re.match(r"^\s*Q:\s*(.*?)\s*\|\s*K:\s*(\w+)", line, re.I)
+        if not m:
+            continue
+        q = m.group(1).strip().strip("'\"")
+        kind = m.group(2).lower()
+        a = ""
+        am = re.search(r"\|\s*A:\s*(.*)$", line, re.I)
+        if am:
+            a = am.group(1).strip().strip("'\"")
+        out.append((q, kind, a))
+    return out
+
+
+def match_profile(question, profile):
+    """Match a personal question to a profile entry by alias; returns (key, value)."""
+    q = question.lower()
+    best = None
+    for key, entry in profile.items():
+        if isinstance(entry, str):
+            aliases = [key]
+            val = entry
+        else:
+            aliases = [key] + [a for a in entry.get("aliases", []) if a]
+            val = entry.get("value", "")
+        for a in aliases:
+            if a and a.lower() in q:
+                if best is None or len(a) > len(best[0]):
+                    best = (a, key, val)
+    if best:
+        return best[1], best[2]
+    return None, ""
 
 def click_text(page, text):
     """Click an element by text with a cascade of fallbacks.
@@ -1398,6 +1455,7 @@ def main():
         consecutive_fails = 0
         last_shot, last_cmd = None, None
         classified_url, is_form = None, False
+        questions_done_url, personal_block = None, ""
         history = []
 
         def remember(msg):
@@ -1491,10 +1549,36 @@ def main():
                         if history:
                             history_text = ("PREVIOUS STEPS (what you already did — stay consistent):\n"
                                             + "\n".join(f"- step {i+1}: {h}" for i, h in enumerate(history)))
+                        # step 1 of form mode: extract the questions + their kind
+                        if is_form and questions_done_url != task_page.url:
+                            extract_prompt = QUESTION_EXTRACT_INSTRUCTION.format(schema=schema_text, profile=profile_ctx) + f"\n{marker}"
+                            reply_q, prov_q = ask_once(ai_page, providers, extract_prompt, marker)
+                            personal_block = ""
+                            if reply_q:
+                                qs = parse_questions(reply_q)
+                                lines = ["PERSONAL INFO ANSWERS (use EXACTLY these — do not invent):"]
+                                added = False
+                                for q, kind, a in qs:
+                                    if kind == "personal":
+                                        if not a:
+                                            _, a = match_profile(q, profile)
+                                        if a:
+                                            lines.append(f"- {q}: {a}")
+                                            added = True
+                                if added:
+                                    personal_block = "\n".join(lines)
+                                print(f"[{prov_q}] extracted {len(qs)} question(s)")
+                            else:
+                                print("[!] question extraction failed — continuing without it")
+                            questions_done_url = task_page.url
+                            done_round = True
+                            consecutive_fails = 0
+                            break
                         if is_form:
                             prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task,
                                                                    profile=profile_ctx, history=history_text,
-                                                                   question=extract_question(schema_text))
+                                                                   question=extract_question(schema_text),
+                                                                   personal=personal_block)
                             print("[i] survey form mode — AI fills ALL fields in one response")
                         else:
                             prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task,
