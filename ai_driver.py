@@ -101,6 +101,8 @@ CLASSIFY_INSTRUCTION = """You are controlling my browser via Playwright. Here is
 
 {schema}
 
+The survey question appears to be: {question}
+
 What kind of page is this? Reply with EXACTLY ONE line, one of:
 survey form     (a question/form page with input fields, selects, radio buttons and a submit/next button)
 command web     (a normal page with buttons/links to click, not a fill-in form)
@@ -110,6 +112,8 @@ Just the one line, nothing else."""
 FORM_INSTRUCTION = """You are controlling my browser via Playwright. This is a SURVEY QUESTION FORM. Here is the current page:
 
 {schema}
+
+The survey QUESTION is: {question}
 
 {profile}
 
@@ -227,7 +231,23 @@ SCHEMA_JS = """(startN) => {
         const alt = clean((el.querySelector('img') || {}).alt);
         const val = clean(el.getAttribute('value')).slice(0, 30);
         const testid = clean(el.getAttribute('data-testid'));
-        const text = (clean(el.textContent) || clean(el.innerText)).slice(0, 60);
+        let text = (clean(el.textContent) || clean(el.innerText)).slice(0, 60);
+        if (!text && (tag === 'span' || tag === 'div')) {
+            // custom radios hide the label: sibling text or CSS pseudo-content
+            try {
+                const sib = el.nextElementSibling || el.previousElementSibling;
+                if (sib) text = clean(sib.textContent).slice(0, 40);
+            } catch (e) {}
+            if (!text) {
+                for (const p of [getComputedStyle(el, '::before'), getComputedStyle(el, '::after')]) {
+                    if (p.content && p.content !== 'none' && p.content !== 'normal'
+                        && p.content !== '""' && p.content !== "''") {
+                        text = p.content.replace(/['"]/g, '').slice(0, 40);
+                        break;
+                    }
+                }
+            }
+        }
         // react-native-web clickables often have NO role/tabindex/cursor — they
         // are plain divs with text. Accept them unless they wrap a real control.
         const hasInteractiveKid = el.querySelector('button, a, input, textarea, select, [role="button"], [role="link"], [onclick]') !== null;
@@ -402,6 +422,14 @@ def parse_commands(reply, exclude=""):
         if re.match(r"^(click|select|fill|type|wait|scroll|goto|done)\b", line, re.I):
             out.append(line)
     return out
+
+
+def extract_question(schema_text):
+    """Find the survey question in the schema (first line containing '?')."""
+    for ln in schema_text.splitlines():
+        if "?" in ln:
+            return ln.strip()[:140]
+    return ""
 
 
 def click_text(page, text):
@@ -1444,7 +1472,7 @@ def main():
                             break
                         # classify the page once per URL: command web vs survey form
                         if classified_url != task_page.url:
-                            classify_prompt = CLASSIFY_INSTRUCTION.format(schema=schema_text) + f"\n{marker}"
+                            classify_prompt = CLASSIFY_INSTRUCTION.format(schema=schema_text, question=extract_question(schema_text)) + f"\n{marker}"
                             reply_c, prov_c = ask_once(ai_page, providers, classify_prompt, marker)
                             if reply_c:
                                 low = reply_c.lower()
@@ -1465,7 +1493,8 @@ def main():
                                             + "\n".join(f"- step {i+1}: {h}" for i, h in enumerate(history)))
                         if is_form:
                             prompt_round = FORM_INSTRUCTION.format(schema=schema_text, task=args.task,
-                                                                   profile=profile_ctx, history=history_text)
+                                                                   profile=profile_ctx, history=history_text,
+                                                                   question=extract_question(schema_text))
                             print("[i] survey form mode — AI fills ALL fields in one response")
                         else:
                             prompt_round = SCHEMA_INSTRUCTION.format(schema=schema_text, task=args.task,
