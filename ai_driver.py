@@ -33,6 +33,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import numpy as np
+from PIL import Image
+
 from playwright.sync_api import sync_playwright
 
 BASE = Path(__file__).resolve().parent
@@ -93,6 +96,19 @@ def find_textbox(page):
 def quoted(s):
     m = re.search(r"""['"]([^'"]*)['"]""", s)
     return m.group(1) if m else s
+
+
+def images_similar(a_path, b_path, threshold=6.0):
+    """True if two screenshots look basically the same (mean pixel diff
+    below the threshold, compared at low resolution)."""
+    try:
+        a = Image.open(a_path).convert("RGB").resize((160, 100))
+        b = Image.open(b_path).convert("RGB").resize((160, 100))
+        diff = np.abs(np.asarray(a, dtype=np.int16)
+                      - np.asarray(b, dtype=np.int16)).mean()
+        return diff < threshold
+    except Exception:
+        return False
 
 
 def parse_command(reply, exclude=""):
@@ -629,6 +645,9 @@ def main():
                          "(slower to be robust; only for testing)")
     ap.add_argument("--refresh-profile", action="store_true",
                     help="force a fresh copy of the real Firefox profile")
+    ap.add_argument("--progress-threshold", type=float, default=6.0,
+                    help="mean pixel diff below which the page counts as 'unchanged' "
+                         "(progress detection)")
     args = ap.parse_args()
 
     if re.match(r"^\s*(task\s*:|i am automating this browser)", args.task, re.I):
@@ -698,6 +717,7 @@ def main():
 
         step = 0
         consecutive_fails = 0
+        last_shot, last_cmd = None, None
         try:
             while True:
                 step += 1
@@ -713,12 +733,27 @@ def main():
                     task_page.screenshot(path=str(shot))
                 print(f"[i] screenshot: {shot}")
 
+                # --- progress check: did the page change since last round? ---
+                no_progress = False
+                if (last_shot is not None and last_cmd
+                        and last_cmd.split(None, 1)[0].lower() in ("click", "fill")
+                        and images_similar(shot, last_shot, args.progress_threshold)):
+                    no_progress = True
+                    print(f"[!] no page change after '{last_cmd}' — will ask for a DIFFERENT action")
+                last_shot = shot
+
+                prompt_round = prompt
+                if no_progress:
+                    prompt_round = (prompt + "\n\nNOTE: I did what you suggested (" + last_cmd +
+                                    ") but the page looks identical — nothing happened. "
+                                    "Do NOT repeat that action. Suggest a DIFFERENT button or approach.")
+
                 done_round = False
                 for provider in providers:
-                    reply = ask_provider(ai_page, provider, shot, args.task, prompt)
+                    reply = ask_provider(ai_page, provider, shot, args.task, prompt_round)
                     if reply and reply.strip():
                         print(f"[{provider}] {reply!r}")
-                        cmd = parse_command(reply, exclude=prompt)
+                        cmd = parse_command(reply, exclude=prompt_round)
                         if cmd:
                             print(f"[cmd] {cmd}")
                             try:
@@ -731,8 +766,20 @@ def main():
                                 print("\n[done] task complete")
                                 ctx.close()
                                 return
+                            # if the action opened a new tab (target=_blank), follow it
+                            new_pages = [pg for pg in ctx.pages if pg not in (ai_page, task_page)]
+                            if new_pages:
+                                old = task_page
+                                task_page = new_pages[0]
+                                task_page.wait_for_load_state("domcontentloaded")
+                                try:
+                                    old.close()
+                                except Exception:
+                                    pass
+                                print("[i] action opened a new tab — now controlling it")
                             done_round = True
                             consecutive_fails = 0
+                            last_cmd = cmd
                             break
                         else:
                             print(f"[!] {provider} replied but no command found — next provider")
