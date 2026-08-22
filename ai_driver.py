@@ -153,14 +153,15 @@ SCHEMA_JS = """(startN) => {
         if (el.closest('[data-testid*="toast" i], [class*="toast" i]')) return;
         const r = el.getBoundingClientRect();
         if (r.width < 2 || r.height < 2) return;
-        if (r.bottom < -1000 || r.top > vh + 3000 || r.right < -500 || r.left > vw + 500) return;
+        if (r.bottom < -1000 || r.top > vh + 6000 || r.right < -500 || r.left > vw + 500) return;
         const st = getComputedStyle(el);
         if (st.display === 'none' || st.visibility === 'hidden') return;
         const tag = el.tagName.toLowerCase();
         const role = (el.getAttribute('role') || '').toLowerCase();
         if (role === 'presentation' || role === 'none') return;
+        const tabbable = el.hasAttribute('tabindex') && parseInt(el.getAttribute('tabindex'), 10) >= 0;
         const isHard = tag === 'a' || tag === 'button' || tag === 'input' || tag === 'textarea' || tag === 'select'
-            || el.getAttribute('contenteditable') === 'true' || el.hasAttribute('onclick') || !!role;
+            || el.getAttribute('contenteditable') === 'true' || el.hasAttribute('onclick') || !!role || tabbable;
         const pointer = st.cursor === 'pointer';
         if (!isHard && !pointer) return;  // clickable divs/spans (cursor:pointer) are included
         const type = el.getAttribute('type') || '';
@@ -559,32 +560,54 @@ def wait_for_ready(page, provider, timeout=20):
 
 def type_into(page, textbox, text):
     """Type multi-line text into a contenteditable WITHOUT pressing Enter
-    (Enter would send the message mid-prompt). Paste via clipboard, with a
-    Shift+Enter line-by-line fallback."""
+    (Enter would send the message mid-prompt). Methods in order:
+    1) execCommand copy + Ctrl+V  2) navigator.clipboard + Ctrl+V
+    3) line-by-line typing with Shift+Enter for newlines."""
     textbox.click(timeout=5000)
-    page.wait_for_timeout(200)
+    page.wait_for_timeout(300)
+    # method 1: execCommand copy + paste
     try:
-        page.evaluate("""(t) => {
+        ok = page.evaluate("""(t) => {
             const ta = document.createElement('textarea');
             ta.value = t;
             ta.style.position = 'fixed';
             ta.style.opacity = '0';
             document.body.appendChild(ta);
             ta.select();
-            document.execCommand('copy');
+            const ok = document.execCommand('copy');
             ta.remove();
+            return ok;
         }""", text)
-        page.keyboard.press("Control+v")
-        page.wait_for_timeout(400)
-        return
+        if ok:
+            page.keyboard.press("Control+v")
+            page.wait_for_timeout(600)
+            got = (textbox.inner_text() or "").strip()
+            if (text[:30] in got) or len(got) > 100:
+                print(f"[i] pasted {len(text)} chars via clipboard (execCommand)")
+                return True
     except Exception as e:
-        print(f"[!] clipboard paste failed ({e}) — typing line by line with Shift+Enter")
+        print(f"[!] clipboard paste failed: {e}")
+    # method 2: navigator.clipboard
+    try:
+        page.evaluate("(t) => navigator.clipboard.writeText(t)", text)
+        page.wait_for_timeout(300)
+        page.keyboard.press("Control+v")
+        page.wait_for_timeout(600)
+        got = (textbox.inner_text() or "").strip()
+        if (text[:30] in got) or len(got) > 100:
+            print(f"[i] pasted {len(text)} chars via clipboard (navigator)")
+            return True
+    except Exception as e:
+        print(f"[!] navigator.clipboard failed: {e}")
+    # method 3: type line by line, Shift+Enter for newlines
+    print("[i] clipboard unavailable — typing line by line (Shift+Enter for newlines)")
     lines = text.split("\n")
     for i, line in enumerate(lines):
-        page.keyboard.type(line, delay=4)
+        page.keyboard.type(line, delay=3)
         if i < len(lines) - 1:
-            page.keyboard.press("Shift+Enter")  # newline without sending
-    page.wait_for_timeout(400)
+            page.keyboard.press("Shift+Enter")
+    page.wait_for_timeout(500)
+    return True
 
 
 def send_message(page, provider, text):
@@ -633,6 +656,7 @@ def send_message(page, provider, text):
     # verify text actually landed
     try:
         filled = (textbox.input_value() or "").strip() or (textbox.inner_text() or "").strip()
+        print(f"[i] {provider}: composer now has {len(filled)} chars")
         if not filled:
             print(f"[!] {provider}: composer empty after typing — retrying")
             try:
@@ -814,6 +838,10 @@ def ask_provider(page, provider, image, task, prompt, attach=True, marker=""):
                 return None
             if not confirm_sent(page, provider, marker):
                 print(f"[!] {provider}: still not confirmed — skipping provider")
+                try:
+                    page.screenshot(path=str(SHOTS / f"debug_{provider}_notsent.png"))
+                except Exception:
+                    pass
                 return None
         print(f"[i] {provider}: message confirmed sent")
     except Exception as e:
@@ -1060,6 +1088,21 @@ def main():
                     print(f"\n[info] reached --steps {args.steps} limit — stopping")
                     break
                 print(f"\n=== round {step} ===")
+                # adopt any popup/new tab that appeared since last round
+                # (survey sites often open popups late, after the command ran)
+                new_pages = [pg for pg in ctx.pages if pg not in (ai_page, task_page)]
+                if new_pages:
+                    old = task_page
+                    task_page = new_pages[0]
+                    try:
+                        task_page.wait_for_load_state("domcontentloaded", timeout=15000)
+                    except Exception:
+                        pass
+                    try:
+                        old.close()
+                    except Exception:
+                        pass
+                    print("[i] adopted a new popup/tab as the task page")
                 if step == 1 and args.image:
                     shot = Path(args.image).resolve()
                 else:
