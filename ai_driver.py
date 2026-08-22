@@ -552,6 +552,28 @@ def click_text(page, text):
     return False
 
 
+def click_by_ocr(page, text):
+    """Fallback for controls whose labels are invisible to the DOM (custom
+    radios etc.): find the text on screen via OCR (tesseract) and click its
+    position. Screenshot coordinates map directly to page.mouse.click."""
+    try:
+        import pytesseract
+        shot = page.screenshot()
+        data = pytesseract.image_to_data(shot, output_type=pytesseract.Output.DICT)
+        for i, w in enumerate(data["text"]):
+            if w and text.lower() in w.lower():
+                x = data["left"][i] + data["width"][i] // 2
+                y = data["top"][i] + data["height"][i] // 2
+                page.mouse.click(x, y)
+                print(f"[ocr] clicked '{w}' at ({x}, {y})")
+                return True
+        print(f"[ocr] '{text}' not found on screen (OCR)")
+        return False
+    except Exception as e:
+        print(f"[!] OCR click failed: {e}")
+        return False
+
+
 def find_input(page, hint):
     sels = [f'input[placeholder*="{hint}"]', f'textarea[placeholder*="{hint}"]',
             f'select[aria-label*="{hint}"]', f'[aria-label*="{hint}"]', "input", "textarea", "select"]
@@ -734,9 +756,11 @@ def execute_command(page, line):
                 loc.click(timeout=8000)
                 print(f"[exec] click element [{m.group(1)}]")
             else:
-                print(f"[!] element [{m.group(1)}] not found (schema stale?)")
+                print(f"[!] element [{m.group(1)}] not found — trying OCR text click")
+                click_by_ocr(page, quoted(rest))
         else:
-            click_text(page, quoted(rest))
+            if not click_text(page, quoted(rest)):
+                click_by_ocr(page, quoted(rest))
     elif cmd == "select":
         mw = re.search(r"\s+with\s+", rest, re.I)
         if not mw:
@@ -1710,6 +1734,12 @@ def main():
                         shot_dbg = SHOTS / f"debug_round_{step}.png"
                         ai_page.screenshot(path=str(shot_dbg))
                         print(f"[!] all providers failed — debug: {shot_dbg}")
+                    if consecutive_fails >= 3 and last_cmd:
+                        mq = re.search(r"'([^']*)'", last_cmd)
+                        if mq:
+                            print(f"[i] 3 failures in a row — OCR click fallback on '{mq.group(1)}'")
+                            click_by_ocr(task_page, mq.group(1))
+                            task_page.wait_for_timeout(1500)
                     print(f"[!] round {step} failed ({consecutive_fails} in a row) — "
                           "retrying forever; Ctrl+C to stop")
                 task_page.wait_for_timeout(1500)
