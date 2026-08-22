@@ -45,7 +45,7 @@ sys.path.insert(0, str(BASE))
 ad = None  # ai_driver imported lazily (only when not --mock)
 
 _state = {"lock": threading.Lock(), "mock": False, "provider": "deepseek",
-          "pw": None, "ctx": None, "page": None}
+          "pw": None, "ctx": None, "page": None, "headful": False}
 
 
 def ask(prompt):
@@ -62,7 +62,7 @@ def ask(prompt):
                 _state["pw"] = sync_playwright().start()
                 user_dir = ad.prepare_real_profile() or ad.PROFILE
                 ctx = _state["pw"].firefox.launch_persistent_context(
-                    user_data_dir=str(user_dir), headless=True,
+                    user_data_dir=str(user_dir), headless=not _state["headful"],
                     viewport={"width": 1200, "height": 800})
                 _state["ctx"] = ctx
                 _state["page"] = ctx.pages[0] if ctx.pages else ctx.new_page()
@@ -166,9 +166,12 @@ def main():
                     default="deepseek")
     ap.add_argument("--mock", action="store_true",
                     help="return canned answers (no browser) — tests the API contract")
+    ap.add_argument("--headful", action="store_true",
+                    help="open a visible browser window (web chats sometimes block headless)")
     args = ap.parse_args()
     _state["mock"] = args.mock
     _state["provider"] = args.provider
+    _state["headful"] = args.headful
     if not args.mock:
         print("[ai_provide] mode: real web chat via ai_driver machinery")
     print(f"[ai_provide] listening on http://{args.host}:{args.port}/v1/chat/completions")
