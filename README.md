@@ -31,7 +31,7 @@ control, exactly like a person clicking.
 
 ```bash
 # 1. clone
-git clone https://github.com/<your-user>/auto-click-copilot.git
+git clone https://github.com/phanhuycuong33-alt/auto_click.git
 cd auto-click-copilot
 
 # 2. install everything (system packages + Python packages)
