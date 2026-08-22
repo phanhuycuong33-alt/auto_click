@@ -105,6 +105,37 @@ def parse_command(reply, exclude=""):
     return None
 
 
+def click_text(page, text):
+    """Click an element by text with a cascade of fallbacks.
+    Strips trailing prices ('Start survey $0.25' -> 'Start survey' -> ...)
+    and tries button, link, then raw text roles. Returns True on success."""
+    candidates = [text]
+    t = text
+    while True:
+        t2 = re.sub(r"\s+\$?[\d.,]+$", "", t).strip()  # strip trailing price/number
+        if not t2 or t2 == t:
+            break
+        candidates.append(t2)
+        t = t2
+    for cand in candidates:
+        for role in ("button", "link"):
+            try:
+                loc = page.get_by_role(role, name=cand, exact=False).first
+                loc.click(timeout=3000)
+                print(f"[exec] click '{cand}' (role={role})")
+                return True
+            except Exception:
+                continue
+        try:
+            page.get_by_text(cand, exact=False).first.click(timeout=3000)
+            print(f"[exec] click '{cand}' (by text)")
+            return True
+        except Exception:
+            continue
+    print(f"[!] could not click '{text}' (tried: {candidates})")
+    return False
+
+
 def find_input(page, hint):
     sels = [f'input[placeholder*="{hint}"]', f'textarea[placeholder*="{hint}"]',
             f'[aria-label*="{hint}"]', "input", "textarea"]
@@ -123,15 +154,7 @@ def execute_command(page, line):
     cmd, rest = m.group(1).lower(), m.group(2).strip()
 
     if cmd == "click":
-        text = quoted(rest)
-        try:
-            page.get_by_role("button", name=text, exact=False).first.click(timeout=8000)
-        except Exception:
-            try:
-                page.get_by_role("link", name=text, exact=False).first.click(timeout=5000)
-            except Exception:
-                page.get_by_text(text, exact=False).first.click(timeout=8000)
-        print(f"[exec] click '{text}'")
+        click_text(page, quoted(rest))
     elif cmd == "fill":
         fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
         if not fm:
@@ -160,9 +183,12 @@ def execute_command(page, line):
         page.mouse.wheel(0, 800 if "up" not in rest else -800)
         print(f"[exec] scroll {rest}")
     elif cmd == "goto":
-        page.goto(quoted(rest))
-        page.wait_for_load_state("domcontentloaded")
-        print(f"[exec] goto {quoted(rest)}")
+        try:
+            page.goto(quoted(rest))
+            page.wait_for_load_state("domcontentloaded")
+            print(f"[exec] goto {quoted(rest)}")
+        except Exception as e:
+            print(f"[!] goto failed: {e}")
     elif cmd == "done":
         print("[exec] done — task complete")
         return False
@@ -635,7 +661,13 @@ def main():
                     cmd = parse_command(reply, exclude=prompt)
                     if cmd:
                         print(f"[cmd] {cmd}")
-                        if not execute_command(task_page, cmd):
+                        try:
+                            cont = execute_command(task_page, cmd)
+                        except Exception as e:
+                            print(f"[!] command raised: {e} — continuing (will re-ask next round)")
+                            task_page.screenshot(path=str(SHOTS / f"debug_exec_{step}.png"))
+                            cont = True
+                        if not cont:
                             print("\n[done] task complete")
                             ctx.close()
                             return
