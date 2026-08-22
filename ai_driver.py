@@ -54,6 +54,7 @@ INSTRUCTION = """You are controlling my browser via Playwright. I just attached 
 Reply with ONLY ONE line, one of these formats:
 click 'button text'
 fill 'field' with 'value'
+select 'field' with 'Option Text'   (dropdowns)
 type 'text'
 wait '3'
 scroll 'down' or 'up'
@@ -71,9 +72,11 @@ Rules:
 - Only lines starting with [N] are CLICKABLE elements. Lines starting with * are page context (headings/text) — never click them.
 - If a popup/modal is open, handle it first (close or accept it) before anything else.
 - Ignore logo/navigation links (href='/') unless there is nothing else useful.
+- Dropdowns/lists: use select [N] with 'Option Text' for <select> elements; for listed option items, click the right one directly with click [N].
 
 Reply with ONLY ONE line, one of these formats:
 click 'text'   (or click [N])
+select [N] with 'Option Text'   (dropdowns/lists)
 fill 'field' with 'value'   (or fill [N] with 'value')
 type 'text'
 wait '3'
@@ -200,10 +203,15 @@ SCHEMA_JS = """(startN) => {
         if (alt) d += " img_alt='" + alt + "'";
         if (testid) d += " testid='" + testid + "'";
         if (href && href !== '#') d += " href='" + href.slice(0, 60) + "'";
+        if (tag === 'select') {
+            const opts = Array.from(el.options || []).slice(0, 15)
+                .map(o => clean(o.text).slice(0, 30)).filter(Boolean).join(', ');
+            if (opts) d += " options='" + opts + "'";
+        }
         out.push(d);
         n++;
     };
-    document.querySelectorAll('a, button, input, textarea, select, [contenteditable="true"], [onclick], [role]').forEach(consider);
+    document.querySelectorAll('a, button, input, textarea, select, li, [contenteditable="true"], [onclick], [role]').forEach(consider);
     if (n < MAX) document.querySelectorAll('div, span').forEach(consider);
     for (const h of document.querySelectorAll('h1, h2, h3')) {
         const t = clean(h.innerText).slice(0, 80);
@@ -304,7 +312,7 @@ def parse_command(reply, exclude=""):
         line = line.strip().lstrip("*-`# ")
         if not line:
             continue
-        if re.match(r"^(click|fill|type|wait|scroll|goto|done)\b", line, re.I):
+        if re.match(r"^(click|select|fill|type|wait|scroll|goto|done)\b", line, re.I):
             return line
     return None
 
@@ -357,7 +365,7 @@ def click_text(page, text):
 
 def find_input(page, hint):
     sels = [f'input[placeholder*="{hint}"]', f'textarea[placeholder*="{hint}"]',
-            f'[aria-label*="{hint}"]', "input", "textarea"]
+            f'select[aria-label*="{hint}"]', f'[aria-label*="{hint}"]', "input", "textarea", "select"]
     for sel in sels:
         try:
             loc = page.locator(sel).first
@@ -383,6 +391,30 @@ def execute_command(page, line):
                 print(f"[!] element [{m.group(1)}] not found (schema stale?)")
         else:
             click_text(page, quoted(rest))
+    elif cmd == "select":
+        fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
+        if not fm:
+            print(f"[!] bad select command: {line}")
+            return True
+        target, value = fm.group(1), fm.group(2)
+        m = re.match(r"^\[(\d+)\]$", target.strip())
+        loc = resolve_element(page, int(m.group(1))) if m else find_input(page, target)
+        if loc is None:
+            print(f"[!] no select found for '{target}'")
+            return True
+        try:
+            loc.select_option(label=value)
+            print(f"[exec] select '{value}' in '{target}'")
+        except Exception:
+            try:
+                loc.select_option(value=value)
+                print(f"[exec] select value '{value}' in '{target}'")
+            except Exception:
+                print(f"[!] could not select '{value}' — trying first option")
+                try:
+                    loc.select_option(index=0)
+                except Exception:
+                    pass
     elif cmd == "fill":
         fm = re.match(r"""['"]([^'"]*)['"]\s+with\s+['"]([^'"]*)['"]""", rest, re.I)
         if not fm:
