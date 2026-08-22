@@ -39,6 +39,7 @@ BASE = Path(__file__).resolve().parent
 SHOTS = BASE / "screenshots"
 SHOTS.mkdir(exist_ok=True)
 PROFILE = BASE / "pw-profile"
+REAL_PROFILE_COPY = BASE / "pw-real-profile"
 
 DEFAULT_STEPS = 5
 DEFAULT_PROVIDERS = ["copilot", "chatgpt", "deepseek"]
@@ -567,6 +568,39 @@ def auto_login(page, username, password):
     print("[i] login submitted — waited 4s")
 
 
+def find_real_profile_dir():
+    """Locate the user's real Firefox profile (snap or apt)."""
+    candidates = []
+    for base in (Path.home() / ".mozilla" / "firefox",
+                 Path.home() / "snap" / "firefox" / "common" / ".mozilla" / "firefox"):
+        if base.is_dir():
+            candidates += sorted(base.glob("*/cookies.sqlite"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime).parent
+
+
+def prepare_real_profile():
+    """Copy the real Firefox profile so Playwright sees the EXACT same
+    session (cookies + localStorage + IndexedDB + everything). Returns the
+    copy's path, or None if no profile was found."""
+    src = find_real_profile_dir()
+    if src is None:
+        print("[!] no real Firefox profile found")
+        return None
+    dst = REAL_PROFILE_COPY
+    if dst.exists():
+        shutil.rmtree(dst)
+    ignore = shutil.ignore_patterns(
+        "cache2", "startupCache", "OfflineCache", "minidumps", "safebrowsing",
+        "datareporting", "crashes", "shader-cache", "telemetry",
+        "parent.lock", "lock", "*.tmp")
+    print(f"[i] copying real Firefox profile -> {dst} ...")
+    shutil.copytree(src, dst, ignore=ignore)
+    print("[i] profile ready — sessions for ALL sites included")
+    return dst
+
+
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Drive the browser via Copilot/ChatGPT/DeepSeek vision")
@@ -582,6 +616,9 @@ def main():
                          "(the --url domain is added automatically)")
     ap.add_argument("--username", default=None, help="login username (auto-fill if login form shows)")
     ap.add_argument("--password", default=None, help="login password (with --username)")
+    ap.add_argument("--no-real-profile", action="store_true",
+                    help="use cookie/localStorage injection instead of copying your real Firefox profile "
+                         "(slower to be robust; only for testing)")
     args = ap.parse_args()
 
     if re.match(r"^\s*(task\s*:|i am automating this browser)", args.task, re.I):
@@ -606,11 +643,17 @@ def main():
         extra_domains += [d.strip() for d in args.cookie_domains.split(",") if d.strip()]
 
     with sync_playwright() as p:
+        if args.no_real_profile:
+            user_dir = PROFILE
+        else:
+            user_dir = prepare_real_profile() or PROFILE
         ctx = p.firefox.launch_persistent_context(
-            user_data_dir=str(PROFILE), headless=False,
+            user_data_dir=str(user_dir), headless=False,
             viewport={"width": 1400, "height": 900})
 
-        if not args.no_cookies:
+        if not args.no_real_profile:
+            print("[i] using full real-profile copy — all sites already signed in")
+        elif not args.no_cookies:
             cookies = load_firefox_cookies(extra_domains)
             if cookies:
                 try:
@@ -629,7 +672,7 @@ def main():
         task_page = ctx.new_page()
         if args.url:
             host = urlsplit(args.url).hostname or ""
-            if host and not args.no_cookies:
+            if host and args.no_real_profile and not args.no_cookies:
                 inject_localstorage(task_page, host)
             task_page.goto(args.url)
             task_page.wait_for_load_state("domcontentloaded")
