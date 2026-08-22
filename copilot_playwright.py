@@ -51,6 +51,18 @@ def visible(loc, timeout=2000):
         return False
 
 
+def find_textbox(page):
+    """Locate the message input with fallback selectors (Copilot UIs differ)."""
+    for sel in ('[role="textbox"]', "textarea"):
+        try:
+            loc = page.locator(sel)
+            if loc.count():
+                return loc.last
+        except Exception:
+            continue
+    return None
+
+
 def load_firefox_cookies():
     """Copy Microsoft session cookies from the user's REAL Firefox profile.
 
@@ -195,33 +207,23 @@ def main():
         opener.click()
         print("[i] attach menu opened")
 
-        # ---------------- 2. 'Upload from this device' -> feed the file ---
-        attached = False
+        # ---------------- 2. attach the file -------------------------------
+        # Best effort: click the visible upload item, then feed the file
+        # straight into the hidden <input type=file> — no dialog involved.
+        for name in UPLOAD_ITEMS:
+            item = page.get_by_role("button", name=name, exact=False).first
+            if visible(item, 1500):
+                item.click()
+                print(f"[i] clicked upload item: {name}")
+                break
+        page.wait_for_timeout(500)
         try:
-            with page.expect_file_chooser(timeout=8000) as fc_info:
-                for name in UPLOAD_ITEMS:
-                    item = page.get_by_role("button", name=name, exact=False).first
-                    if visible(item, 2000):
-                        item.click()
-                        break
-            fc = fc_info.value
-            fc.set_files(image)
-            attached = True
+            page.set_input_files("input[type=file]", image, timeout=10000)
             print(f"[i] file attached: {image}")
         except Exception as e:
-            print(f"[!] file-chooser route failed ({e}); trying input[type=file]...")
-            try:
-                page.set_input_files("input[type=file]", image)
-                attached = True
-                print("[i] file attached via input[type=file]")
-            except Exception as e2:
-                print(f"[!] direct input failed too: {e2}")
-                page.screenshot(path=str(SHOTS / "debug_attach.png"))
-                print(f"    debug screenshot: {SHOTS / 'debug_attach.png'}")
-                ctx.close()
-                return
-        if not attached:
-            print("[!] could not attach the file")
+            print(f"[!] set_input_files failed: {e}")
+            page.screenshot(path=str(SHOTS / "debug_attach.png"))
+            print(f"    debug screenshot: {SHOTS / 'debug_attach.png'}")
             ctx.close()
             return
 
@@ -230,7 +232,21 @@ def main():
         page.screenshot(path=str(SHOTS / "attached.png"))
         print(f"[i] state after attach: {SHOTS / 'attached.png'}")
 
-        textbox = page.get_by_role("textbox").last
+        # close any leftover menu, then find the input with retries
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1200)
+        textbox = None
+        for attempt in range(6):
+            textbox = find_textbox(page)
+            if textbox is not None:
+                break
+            page.wait_for_timeout(2000)
+        if textbox is None:
+            print("[!] could not find the message input — saving debug screenshot")
+            page.screenshot(path=str(SHOTS / "debug_textbox.png"))
+            print(f"    debug screenshot: {SHOTS / 'debug_textbox.png'}")
+            ctx.close()
+            return
         textbox.click()
         try:
             textbox.fill(question)
